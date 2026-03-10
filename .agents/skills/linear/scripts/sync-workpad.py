@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Sync local workpad.md to a Linear issue comment.
+"""Sync a local markdown file to a Linear issue comment.
 
 First call creates the comment; subsequent calls update it.
 
-Usage: python3 sync-workpad.py <issue-id>
+Usage: python3 sync-workpad.py <issue-id> [path]
 
-Reads:  workpad.md   (workpad content)
+Args:   issue-id  Linear issue identifier (e.g. ORC-535)
+        path      Markdown file to sync (default: workpad.md)
 State:  .workpad-id  (persisted comment ID, created automatically)
 Env:    LINEAR_API_KEY
 """
@@ -14,20 +15,21 @@ import json, os, sys, urllib.request
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 sync-workpad.py <issue-id>", file=sys.stderr)
+        print("Usage: python3 sync-workpad.py <issue-id> [path]", file=sys.stderr)
         sys.exit(1)
 
     issue_id = sys.argv[1]
+    workpad_path = sys.argv[2] if len(sys.argv) > 2 else "workpad.md"
     api_key = os.environ.get("LINEAR_API_KEY")
     if not api_key:
         print("error: LINEAR_API_KEY not set", file=sys.stderr)
         sys.exit(1)
 
-    if not os.path.exists("workpad.md"):
-        print("error: workpad.md not found", file=sys.stderr)
+    if not os.path.exists(workpad_path):
+        print(f"error: {workpad_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    body = open("workpad.md").read()
+    body = open(workpad_path).read()
 
     if os.path.exists(".workpad-id"):
         comment_id = open(".workpad-id").read().strip()

@@ -69,6 +69,26 @@ python3 .agents/skills/linear/scripts/upload-file.py <file-path>
 Output: the asset URL. Embed as `![description](url)` for images or
 `[filename](url)` for other files.
 
+## Issue creation
+
+Create an issue in a project. Resolves project slug and team internally.
+
+```
+python3 .agents/skills/linear/scripts/create-issue.py <project-slug> "Title" [key=value ...]
+```
+
+Options (passed as `key=value` after positional args):
+- `description=<markdown>` — issue description
+- `priority=<0-4>` — 0=none, 1=urgent, 2=high, 3=medium, 4=low
+- `state=<name>` — workflow state (default: Backlog)
+- `blocked_by=<issue-id>` — issue that blocks this one
+- `related=<issue-id>` — related issue
+
+Output: `ORC-123 https://linear.app/...`
+
+For batch creation, call the script once per issue. Wire up relations after
+all issues exist so IDs are available.
+
 ## Reading issues
 
 The orchestrator injects issue context (identifier, title, description, state,
