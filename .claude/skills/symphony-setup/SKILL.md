@@ -129,6 +129,12 @@ The workflow requires three non-standard states: **Rework**, **Human Review**, *
 
 During the auto-check in repo preparation, if any are missing, **create them via the API** using `workflowStateCreate` (see [references/linear-graphql.md](references/linear-graphql.md)). Confirm with the user before creating. No manual Linear UI steps needed.
 
+## Pre-launch: check active tickets
+
+Before starting Symphony, query the project for all tickets in active states (`Todo`, `In Progress`, `Rework`). Symphony will immediately dispatch agents for **every** active ticket — not just new ones.
+
+List them for the user and confirm they're ready. If any tickets shouldn't be worked on yet, offer to move them to `Backlog` via `issueUpdate` before launching.
+
 ## Run
 
 ```bash
