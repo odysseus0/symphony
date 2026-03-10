@@ -71,7 +71,37 @@ query TeamStates($teamId: String!) {
 ```
 
 Required custom states (all type `started`): **Rework**, **Human Review**, **Merging**.
-If any are missing, user adds them in Linear: Team Settings → Workflow.
+If any are missing, create them via `workflowStateCreate` (see below).
+
+### Create missing workflow states
+
+```graphql
+mutation CreateWorkflowState($teamId: String!, $name: String!, $type: String!, $color: String!) {
+  workflowStateCreate(input: {
+    teamId: $teamId
+    name: $name
+    type: $type
+    color: $color
+  }) {
+    success
+    workflowState {
+      id
+      name
+      type
+    }
+  }
+}
+```
+
+Use these values for the three required states:
+
+| Name | Type | Color |
+|------|------|-------|
+| Rework | `started` | `#db6e1f` |
+| Human Review | `started` | `#da8b0d` |
+| Merging | `started` | `#0f783c` |
+
+Confirm with the user before creating states.
 
 ## Discovering unfamiliar operations
 

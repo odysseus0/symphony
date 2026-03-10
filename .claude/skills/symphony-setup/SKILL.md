@@ -100,7 +100,9 @@ After pushing, verify: `git log origin/$(git branch --show-current) --oneline -1
 
 ## Linear custom states
 
-The workflow requires three non-standard states: **Rework**, **Human Review**, **Merging**. If the auto-check during repo preparation found any missing, remind the user which ones to add in Linear (Team Settings → Workflow). Without them, agents can't transition tickets through the full lifecycle.
+The workflow requires three non-standard states: **Rework**, **Human Review**, **Merging** (all type `started`).
+
+During the auto-check in repo preparation, if any are missing, **create them via the API** using `workflowStateCreate` (see [references/linear-graphql.md](references/linear-graphql.md)). Confirm with the user before creating. No manual Linear UI steps needed.
 
 ## Run
 
