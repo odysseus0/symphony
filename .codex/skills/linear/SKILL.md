@@ -32,43 +32,6 @@ Tool behavior:
   tool call itself completed.
 - Keep queries/mutations narrowly scoped; ask only for the fields you need.
 
-## Discovering unfamiliar operations
-
-When you need an unfamiliar mutation, input type, or object field, use targeted
-introspection through `linear_graphql`.
-
-List mutation names:
-
-```graphql
-query ListMutations {
-  __type(name: "Mutation") {
-    fields {
-      name
-    }
-  }
-}
-```
-
-Inspect a specific input object:
-
-```graphql
-query CommentCreateInputShape {
-  __type(name: "CommentCreateInput") {
-    inputFields {
-      name
-      type {
-        kind
-        name
-        ofType {
-          kind
-          name
-        }
-      }
-    }
-  }
-}
-```
-
 ## Common workflows
 
 ### Query an issue by key, identifier, or id
@@ -295,45 +258,6 @@ mutation AttachURL($issueId: String!, $url: String!, $title: String) {
 }
 ```
 
-### Introspection patterns used during schema discovery
-
-Use these when the exact field or mutation shape is unclear:
-
-```graphql
-query QueryFields {
-  __type(name: "Query") {
-    fields {
-      name
-    }
-  }
-}
-```
-
-```graphql
-query IssueFieldArgs {
-  __type(name: "Query") {
-    fields {
-      name
-      args {
-        name
-        type {
-          kind
-          name
-          ofType {
-            kind
-            name
-            ofType {
-              kind
-              name
-            }
-          }
-        }
-      }
-    }
-  }
-}
-```
-
 ### Upload a video to a comment
 
 Do this in three steps:
@@ -383,6 +307,8 @@ mutation FileUpload(
   instead of hardcoding names inside mutations.
 - Prefer `attachmentLinkGitHubPR` over a generic URL attachment when linking a
   GitHub PR to a Linear issue.
+- Do not use `__type` introspection queries — they return the entire schema
+  (200K+ chars) and waste most of the context window.
 - Do not introduce new raw-token shell helpers for GraphQL access.
 - If you need shell work for uploads, only use it for signed upload URLs
   returned by `fileUpload`; those URLs already carry the needed authorization.
