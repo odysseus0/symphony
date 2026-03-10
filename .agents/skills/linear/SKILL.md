@@ -20,7 +20,7 @@ API cost), then sync to Linear at milestones — plan finalized, implementation
 done, validation complete. Do not sync after every small change.
 
 ```
-python3 .codex/skills/linear/scripts/sync-workpad.py <issue-id>
+python3 .agents/skills/linear/scripts/sync-workpad.py <issue-id>
 ```
 
 First call creates the comment on the issue. Subsequent calls update it.
@@ -34,7 +34,7 @@ Move an issue to a named workflow state. Resolves the state name to an internal
 ID automatically — you never need to look up state IDs.
 
 ```
-python3 .codex/skills/linear/scripts/move-issue.py <issue-id> "<state-name>"
+python3 .agents/skills/linear/scripts/move-issue.py <issue-id> "<state-name>"
 ```
 
 Output: `moved to <state-name>` or lists available states on error.
@@ -44,7 +44,7 @@ Output: `moved to <state-name>` or lists available states on error.
 Link a GitHub PR to a Linear issue:
 
 ```
-python3 .codex/skills/linear/scripts/attach-pr.py <issue-id> <pr-url> [title]
+python3 .agents/skills/linear/scripts/attach-pr.py <issue-id> <pr-url> [title]
 ```
 
 Output: `attached`
@@ -52,7 +52,7 @@ Output: `attached`
 For non-GitHub URLs (plain links, docs, etc.):
 
 ```
-python3 .codex/skills/linear/scripts/attach-url.py <issue-id> <url> [title]
+python3 .agents/skills/linear/scripts/attach-url.py <issue-id> <url> [title]
 ```
 
 Output: `attached`
@@ -63,7 +63,7 @@ Upload a file (screenshot, video, etc.) and get a URL to embed in comments or
 the workpad:
 
 ```
-python3 .codex/skills/linear/scripts/upload-file.py <file-path>
+python3 .agents/skills/linear/scripts/upload-file.py <file-path>
 ```
 
 Output: the asset URL. Embed as `![description](url)` for images or
@@ -78,7 +78,7 @@ the issue.
 If you need comments, attachments, or linked PRs:
 
 ```
-python3 .codex/skills/linear/scripts/read-issue.py <issue-id>
+python3 .agents/skills/linear/scripts/read-issue.py <issue-id>
 ```
 
 Output: markdown-formatted comments (with IDs) and attachments. Only what

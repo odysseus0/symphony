@@ -71,7 +71,7 @@ If detected, propose a `launch-app` skill based on what you find (framework, sta
 
 Copy two things from Symphony into the user's repo:
 
-1. **`.codex/skills/`** — agents need these in their workspace clone to commit, push, open PRs, and interact with Linear.
+1. **`.agents/skills/`** — agents need these in their workspace clone to commit, push, open PRs, and interact with Linear.
 2. **`elixir/WORKFLOW.md`** — copy the **entire file** including the markdown body. The prompt body contains the state machine, planning protocol, and validation strategy that makes agents effective.
 
 ## Patch WORKFLOW.md frontmatter
@@ -100,7 +100,7 @@ hooks:
 
 ## App launch skill (if applicable)
 
-If the user's project has a UI or app that needs runtime testing, create `.codex/skills/launch-app/SKILL.md` in their repo:
+If the user's project has a UI or app that needs runtime testing, create `.agents/skills/launch-app/SKILL.md` in their repo:
 
 ```markdown
 ---
@@ -119,7 +119,7 @@ The WORKFLOW.md prompt tells agents to "run runtime validation" for app-touching
 
 ## Commit and push
 
-Commit `.codex/`, `WORKFLOW.md`, and `launch-app` skill (if created) to the user's repo and push. **Push is critical** — agents clone from the remote, so unpushed changes are invisible to workers.
+Commit `.agents/skills/`, `WORKFLOW.md`, and `launch-app` skill (if created) to the user's repo and push. **Push is critical** — agents clone from the remote, so unpushed changes are invisible to workers.
 
 After pushing, verify: `git log origin/$(git branch --show-current) --oneline -1` should show your commit.
 
@@ -157,7 +157,7 @@ Have the user push a test ticket to Todo in Linear. Watch for the first worker t
 - [ ] `codex` authenticated?
 - [ ] `gh auth status` passing?
 - [ ] Repo clone URL works non-interactively?
-- [ ] `.codex/skills/` and `WORKFLOW.md` pushed to remote?
+- [ ] `.agents/skills/` and `WORKFLOW.md` pushed to remote?
 - [ ] Custom Linear states (Rework, Human Review, Merging) added?
 
 ## Getting started after setup
