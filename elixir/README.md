@@ -14,13 +14,13 @@ Fork of [openai/symphony](https://github.com/openai/symphony) with setup frictio
 If you're using Claude Code or Codex, install the setup skill — it handles everything below plus project-specific config like `launch-app`:
 
 ```
-npx skills add https://github.com/odysseus0/symphony/tree/getting-started -s symphony-setup -y
+npx skills add odysseus0/symphony -s symphony-setup -y
 ```
 
 Otherwise, the quick start:
 
-1. Build: `git clone -b getting-started https://github.com/odysseus0/symphony && cd symphony/elixir && mise trust && mise install && mise exec -- mix setup && mise exec -- mix build`
-2. Install skills: `npx skills add https://github.com/odysseus0/symphony/tree/getting-started -a codex --copy -y` and copy `elixir/WORKFLOW.md` to your repo
+1. Build: `git clone https://github.com/odysseus0/symphony && cd symphony/elixir && mise trust && mise install && mise exec -- mix setup && mise exec -- mix build`
+2. Install skills: `npx skills add odysseus0/symphony -a codex -s linear land commit push pull debug --copy -y` and copy `elixir/WORKFLOW.md` to your repo
 3. In WORKFLOW.md, set `tracker.project_slug` and `hooks.after_create` (clone your repo + setup commands)
 4. Add **Rework**, **Human Review**, **Merging** as custom states in Linear (Team Settings → Workflow)
 5. Commit, push, then: `mise exec -- ./bin/symphony /path/to/your-repo/WORKFLOW.md`

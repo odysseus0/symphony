@@ -24,7 +24,7 @@ Report results to the user before proceeding.
 Use the getting-started fork — sandbox, MCP, and internal tool references already fixed:
 
 ```bash
-git clone -b getting-started https://github.com/odysseus0/symphony
+git clone https://github.com/odysseus0/symphony
 cd symphony/elixir
 mise trust && mise install
 mise exec -- mix setup
@@ -69,9 +69,14 @@ Check whether the project has a launchable UI before asking:
 
 If detected, propose a `launch-app` skill based on what you find (framework, start script, default port). Confirm with the user and adjust. If nothing detected, ask whether there's a UI — for pure libraries/CLIs/APIs, skip the launch skill.
 
-Copy two things from Symphony into the user's repo:
+Install two things from Symphony into the user's repo:
 
-1. **`.agents/skills/`** — agents need these in their workspace clone to commit, push, open PRs, and interact with Linear.
+1. **Skills** — install via skills.sh (agents need these in their workspace clone):
+   ```bash
+   cd <user's repo>
+   npx skills add odysseus0/symphony -a codex -s linear land commit push pull debug --copy -y
+   ```
+   The `--copy` flag is required — symlinks would break in workspace clones. The `-s` flag excludes `symphony-setup` (meta-skill, not needed by workers).
 2. **`elixir/WORKFLOW.md`** — copy the **entire file** including the markdown body. The prompt body contains the state machine, planning protocol, and validation strategy that makes agents effective.
 
 ## Patch WORKFLOW.md frontmatter
