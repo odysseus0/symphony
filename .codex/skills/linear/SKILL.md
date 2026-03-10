@@ -1,314 +1,94 @@
 ---
 name: linear
 description: |
-  Use Symphony's `linear_graphql` client tool for raw Linear GraphQL
-  operations such as comment editing and upload flows.
+  Linear API operations for Symphony agents. Provides scripts for workpad sync,
+  state transitions, PR attachment, and file uploads. Use these scripts instead
+  of composing raw GraphQL.
 ---
 
-# Linear GraphQL
+# Linear Operations
 
-Use this skill for raw Linear GraphQL work during Symphony app-server sessions.
+Scripts for all common Linear operations. Use these instead of raw `linear_graphql`
+calls — they handle auth, error handling, and return minimal output.
 
-## Primary tool
+All scripts require `LINEAR_API_KEY` in the environment.
 
-Use the `linear_graphql` client tool exposed by Symphony's app-server session.
-It reuses Symphony's configured Linear auth for the session.
+## Workpad
 
-Tool input:
+Maintain a local `workpad.md` file in your workspace root. Edit it freely (zero
+API cost), then sync to Linear at milestones — plan finalized, implementation
+done, validation complete. Do not sync after every small change.
 
-```json
-{
-  "query": "query or mutation document",
-  "variables": {
-    "optional": "graphql variables object"
-  }
-}
+```
+python3 .codex/skills/linear/scripts/sync-workpad.py <issue-id>
 ```
 
-Tool behavior:
+First call creates the comment on the issue. Subsequent calls update it.
+State is tracked in `.workpad-id` (created automatically).
 
-- Send one GraphQL operation per tool call.
-- Treat a top-level `errors` array as a failed GraphQL operation even if the
-  tool call itself completed.
-- Keep queries/mutations narrowly scoped; ask only for the fields you need.
+Output: `synced (created)` or `synced (updated)`
 
-## Common workflows
+## State transitions
 
-### Query an issue by key, identifier, or id
+Move an issue to a named workflow state. Resolves the state name to an internal
+ID automatically — you never need to look up state IDs.
 
-Use these progressively:
-
-- Start with `issue(id: $key)` when you have a ticket key such as `MT-686`.
-- Fall back to `issues(filter: ...)` when you need identifier search semantics.
-- Once you have the internal issue id, prefer `issue(id: $id)` for narrower reads.
-
-Lookup by issue key:
-
-```graphql
-query IssueByKey($key: String!) {
-  issue(id: $key) {
-    id
-    identifier
-    title
-    state {
-      id
-      name
-      type
-    }
-    project {
-      id
-      name
-    }
-    branchName
-    url
-    description
-    updatedAt
-    links {
-      nodes {
-        id
-        url
-        title
-      }
-    }
-  }
-}
+```
+python3 .codex/skills/linear/scripts/move-issue.py <issue-id> "<state-name>"
 ```
 
-Lookup by identifier filter:
+Output: `moved to <state-name>` or lists available states on error.
 
-```graphql
-query IssueByIdentifier($identifier: String!) {
-  issues(filter: { identifier: { eq: $identifier } }, first: 1) {
-    nodes {
-      id
-      identifier
-      title
-      state {
-        id
-        name
-        type
-      }
-      project {
-        id
-        name
-      }
-      branchName
-      url
-      description
-      updatedAt
-    }
-  }
-}
+## PR attachment
+
+Link a GitHub PR to a Linear issue:
+
+```
+python3 .codex/skills/linear/scripts/attach-pr.py <issue-id> <pr-url> [title]
 ```
 
-Resolve a key to an internal id:
+Output: `attached`
 
-```graphql
-query IssueByIdOrKey($id: String!) {
-  issue(id: $id) {
-    id
-    identifier
-    title
-  }
-}
+For non-GitHub URLs (plain links, docs, etc.):
+
+```
+python3 .codex/skills/linear/scripts/attach-url.py <issue-id> <url> [title]
 ```
 
-Read the issue once the internal id is known:
+Output: `attached`
 
-```graphql
-query IssueDetails($id: String!) {
-  issue(id: $id) {
-    id
-    identifier
-    title
-    url
-    description
-    state {
-      id
-      name
-      type
-    }
-    project {
-      id
-      name
-    }
-    attachments {
-      nodes {
-        id
-        title
-        url
-        sourceType
-      }
-    }
-  }
-}
+## File upload
+
+Upload a file (screenshot, video, etc.) and get a URL to embed in comments or
+the workpad:
+
+```
+python3 .codex/skills/linear/scripts/upload-file.py <file-path>
 ```
 
-### Query team workflow states for an issue
+Output: the asset URL. Embed as `![description](url)` for images or
+`[filename](url)` for other files.
 
-Use this before changing issue state when you need the exact `stateId`:
+## Reading issues
 
-```graphql
-query IssueTeamStates($id: String!) {
-  issue(id: $id) {
-    id
-    team {
-      id
-      key
-      name
-      states {
-        nodes {
-          id
-          name
-          type
-        }
-      }
-    }
-  }
-}
+The orchestrator injects issue context (identifier, title, description, state,
+labels, URL) into your prompt at startup. You usually do not need to re-read
+the issue.
+
+If you need comments, attachments, or linked PRs:
+
+```
+python3 .codex/skills/linear/scripts/read-issue.py <issue-id>
 ```
 
-### Edit an existing comment
+Output: markdown-formatted comments (with IDs) and attachments. Only what
+you need for context — not the full issue dump.
 
-Use `commentUpdate` through `linear_graphql`:
+## Rules
 
-```graphql
-mutation UpdateComment($id: String!, $body: String!) {
-  commentUpdate(id: $id, input: { body: $body }) {
-    success
-    comment {
-      id
-      body
-    }
-  }
-}
-```
-
-### Create a comment
-
-Use `commentCreate` through `linear_graphql`:
-
-```graphql
-mutation CreateComment($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-    comment {
-      id
-      url
-    }
-  }
-}
-```
-
-### Move an issue to a different state
-
-Use `issueUpdate` with the destination `stateId`:
-
-```graphql
-mutation MoveIssueToState($id: String!, $stateId: String!) {
-  issueUpdate(id: $id, input: { stateId: $stateId }) {
-    success
-    issue {
-      id
-      identifier
-      state {
-        id
-        name
-      }
-    }
-  }
-}
-```
-
-### Attach a GitHub PR to an issue
-
-Use the GitHub-specific attachment mutation when linking a PR:
-
-```graphql
-mutation AttachGitHubPR($issueId: String!, $url: String!, $title: String) {
-  attachmentLinkGitHubPR(
-    issueId: $issueId
-    url: $url
-    title: $title
-    linkKind: links
-  ) {
-    success
-    attachment {
-      id
-      title
-      url
-    }
-  }
-}
-```
-
-If you only need a plain URL attachment and do not care about GitHub-specific
-link metadata, use:
-
-```graphql
-mutation AttachURL($issueId: String!, $url: String!, $title: String) {
-  attachmentLinkURL(issueId: $issueId, url: $url, title: $title) {
-    success
-    attachment {
-      id
-      title
-      url
-    }
-  }
-}
-```
-
-### Upload a video to a comment
-
-Do this in three steps:
-
-1. Call `linear_graphql` with `fileUpload` to get `uploadUrl`, `assetUrl`, and
-   any required upload headers.
-2. Upload the local file bytes to `uploadUrl` with `curl -X PUT` and the exact
-   headers returned by `fileUpload`.
-3. Call `linear_graphql` again with `commentCreate` (or `commentUpdate`) and
-   include the resulting `assetUrl` in the comment body.
-
-Useful mutations:
-
-```graphql
-mutation FileUpload(
-  $filename: String!
-  $contentType: String!
-  $size: Int!
-  $makePublic: Boolean
-) {
-  fileUpload(
-    filename: $filename
-    contentType: $contentType
-    size: $size
-    makePublic: $makePublic
-  ) {
-    success
-    uploadFile {
-      uploadUrl
-      assetUrl
-      headers {
-        key
-        value
-      }
-    }
-  }
-}
-```
-
-## Usage rules
-
-- Use `linear_graphql` for comment edits, uploads, and ad-hoc Linear API
-  queries.
-- Prefer the narrowest issue lookup that matches what you already know:
-  key -> identifier search -> internal id.
-- For state transitions, fetch team states first and use the exact `stateId`
-  instead of hardcoding names inside mutations.
-- Prefer `attachmentLinkGitHubPR` over a generic URL attachment when linking a
-  GitHub PR to a Linear issue.
+- Use the scripts above for all write operations. Do not compose raw GraphQL
+  for workpad updates, state transitions, PR attachments, or file uploads.
 - Do not use `__type` introspection queries — they return the entire schema
   (200K+ chars) and waste most of the context window.
-- Do not introduce new raw-token shell helpers for GraphQL access.
-- If you need shell work for uploads, only use it for signed upload URLs
-  returned by `fileUpload`; those URLs already carry the needed authorization.
+- Keep `linear_graphql` queries narrowly scoped — ask only for fields you need.
+- Sync the workpad at milestones, not after every change.
