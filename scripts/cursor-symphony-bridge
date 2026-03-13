@@ -15,9 +15,15 @@ Usage (from WORKFLOW.md agents section)::
 
     agents:
       cursor:
-        command: cursor-symphony-bridge
+        command: cursor-symphony-bridge --model gpt-5.4
+
+Supports ``--model`` flag or ``CURSOR_MODEL`` env var to select the
+underlying LLM.  The flag takes precedence over the env var.
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import os
 import signal
@@ -45,6 +51,33 @@ def log(message: str) -> None:
     sys.stderr.flush()
 
 
+_session_log_file = None
+
+
+def session_log(message: str) -> None:
+    """Append a human-readable line to the session activity log."""
+    global _session_log_file
+    if _session_log_file is None:
+        log_dir = os.path.expanduser("~/.cache/symphony-logs")
+        os.makedirs(log_dir, exist_ok=True)
+        _session_log_file = open(
+            os.path.join(log_dir, f"bridge-{os.getpid()}.log"), "a"
+        )
+    ts = time.strftime("%H:%M:%S")
+    _session_log_file.write(f"[{ts}] {message}\n")
+    _session_log_file.flush()
+
+
+def _resolve_mcp_server_path() -> str:
+    """Locate symphony-linear-mcp next to this bridge script."""
+    bridge_dir = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.join(bridge_dir, "symphony-linear-mcp")
+    if os.path.isfile(candidate):
+        return candidate
+    # Fallback: assume it's on PATH
+    return "symphony-linear-mcp"
+
+
 # ---------------------------------------------------------------------------
 # ACPClient — manages the ``agent acp`` child process
 # ---------------------------------------------------------------------------
@@ -58,15 +91,16 @@ class ACPClient:
       from the ACP process's stdout.
     * Responses (messages with an ``id`` matching a pending request) are
       routed to the waiting caller via a per-request ``threading.Event``.
-    * Notifications (``session/update``) are silently consumed.
+    * Notifications (``session/update``) are logged for observability.
     * Requests from ACP (``session/request_permission``) are auto-approved.
+    * Cursor extension methods are handled gracefully.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, model: str | None = None) -> None:
         self.process: subprocess.Popen | None = None
+        self._model = model
         self._next_id: int = 1
         self._lock = threading.Lock()
-        # Pending requests: id -> {"event": Event, "result": ..., "error": ...}
         self._pending: dict[int, dict] = {}
         self._reader_thread: threading.Thread | None = None
         self._alive = False
@@ -79,6 +113,8 @@ class ACPClient:
         api_key = os.environ.get("CURSOR_API_KEY")
         if api_key:
             cmd += ["--api-key", api_key]
+        if self._model:
+            cmd += ["--model", self._model]
         cmd.append("acp")
 
         try:
@@ -128,7 +164,10 @@ class ACPClient:
         """Perform the ACP ``initialize`` handshake."""
         return self._send_request("initialize", {
             "protocolVersion": 1,
-            "clientCapabilities": {},
+            "clientCapabilities": {
+                "fs": {"readTextFile": False, "writeTextFile": False},
+                "terminal": False,
+            },
             "clientInfo": {
                 "name": "symphony-cursor-bridge",
                 "title": "Symphony Cursor Bridge",
@@ -136,23 +175,26 @@ class ACPClient:
             },
         })
 
-    def new_session(self, cwd: str) -> str:
-        """Create a new ACP session.  Returns the ``sessionId``."""
-        result = self._send_request("session/new", {
-            "cwd": cwd,
-            "mcpServers": [],
+    def authenticate(self) -> dict:
+        """Perform ACP ``authenticate`` with cursor_login method."""
+        return self._send_request("authenticate", {
+            "methodId": "cursor_login",
         })
+
+    def new_session(self, cwd: str, mcp_servers: list | None = None) -> str:
+        """Create a new ACP session.  Returns the ``sessionId``."""
+        params: dict = {
+            "cwd": cwd,
+            "mcpServers": mcp_servers or [],
+        }
+        result = self._send_request("session/new", params, timeout=120)
         session_id = result.get("sessionId") if isinstance(result, dict) else None
         if not session_id:
             raise RuntimeError(f"session/new did not return a sessionId: {result!r}")
         return session_id
 
     def prompt(self, session_id: str, text: str, *, timeout: int = 3600) -> dict:
-        """Send ``session/prompt`` and block until the prompt completes.
-
-        Returns the ACP response ``result`` dict which includes
-        ``stopReason``.
-        """
+        """Send ``session/prompt`` and block until the prompt completes."""
         return self._send_request(
             "session/prompt",
             {
@@ -219,8 +261,7 @@ class ACPClient:
                 self._alive = False
 
     def _respond(self, request_id, result: dict) -> None:
-        """Send a JSON-RPC response back to ACP (for server→client requests
-        like ``session/request_permission``)."""
+        """Send a JSON-RPC response back to ACP."""
         self._write({"jsonrpc": "2.0", "id": request_id, "result": result})
 
     # -- background reader --------------------------------------------------
@@ -246,7 +287,6 @@ class ACPClient:
             log(f"ACP reader thread error: {exc}")
         finally:
             self._alive = False
-            # Wake up any waiters so they don't hang forever.
             with self._lock:
                 for entry in self._pending.values():
                     if entry["error"] is None and entry["result"] is None:
@@ -256,7 +296,6 @@ class ACPClient:
     def _dispatch_acp_message(self, msg: dict) -> None:
         """Route an incoming ACP message to the right handler."""
 
-        # --- JSON-RPC response (has ``id`` + ``result`` or ``error``) ------
         msg_id = msg.get("id")
         if msg_id is not None and ("result" in msg or "error" in msg):
             with self._lock:
@@ -269,22 +308,98 @@ class ACPClient:
                 entry["event"].set()
             return
 
-        # --- Server→client request (has ``id`` + ``method``) ---------------
         method = msg.get("method")
+
         if method == "session/request_permission" and msg_id is not None:
-            # Auto-approve all permission requests.
-            self._respond(msg_id, {"outcome": "allow-always"})
+            session_log(f"  [PERMISSION] auto-approving: {json.dumps(msg.get('params', {}), ensure_ascii=False)[:300]}")
+            self._respond(msg_id, {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": "allow-always",
+                },
+            })
             return
 
-        # --- Notifications (no ``id``, has ``method``) ---------------------
         if method == "session/update":
-            # Silently consume streaming updates.  The existing bridge did
-            # not forward any streaming events to Symphony either.
+            _log_session_update(msg)
             return
 
-        # Other unknown messages — log and ignore.
+        # Cursor extension methods — respond with empty result to unblock
+        if method and method.startswith("cursor/") and msg_id is not None:
+            session_log(f"  [CURSOR_EXT] {method}")
+            self._respond(msg_id, {})
+            return
+
         if method:
-            log(f"Unhandled ACP notification: {method}")
+            log(f"Unhandled ACP method: {method}")
+            if msg_id is not None:
+                self._respond(msg_id, {})
+
+
+# ---------------------------------------------------------------------------
+# Session update logging
+# ---------------------------------------------------------------------------
+
+_update_count = 0
+
+
+def _log_session_update(msg: dict) -> None:
+    """Log session/update notifications using ACP sessionUpdate schema."""
+    global _update_count
+    params = msg.get("params", {})
+    update = params.get("update", {})
+    kind = update.get("sessionUpdate", "")
+
+    _update_count += 1
+    if _update_count <= 10:
+        raw = json.dumps(params, ensure_ascii=False, default=str)
+        session_log(f"  [RAW#{_update_count}] {raw[:2000]}")
+
+    if kind == "agent_message_chunk":
+        content = update.get("content", {})
+        text = content.get("text", "") if isinstance(content, dict) else ""
+        if text:
+            for line in text.strip().splitlines():
+                session_log(f"  [AGENT] {line}")
+
+    elif kind == "plan":
+        entries = update.get("entries", [])
+        session_log(f"  [PLAN] {len(entries)} entries")
+        for e in entries[:10]:
+            st = e.get("status", "?")
+            txt = e.get("content", "")[:120]
+            session_log(f"    [{st}] {txt}")
+
+    elif kind == "tool_call":
+        title = update.get("title", "")
+        status = update.get("status", "")
+        tool_kind = update.get("kind", "")
+        call_id = update.get("toolCallId", "")
+        session_log(f"  [TOOL] {title} ({tool_kind}) -> {status} [{call_id}]")
+
+    elif kind == "tool_call_update":
+        tool_id = update.get("toolCallId", "")
+        status = update.get("status", "")
+        content_items = update.get("content", [])
+        text = ""
+        if isinstance(content_items, list):
+            for ci in content_items:
+                c = ci.get("content", {}) if isinstance(ci, dict) else {}
+                t = c.get("text", "") if isinstance(c, dict) else ""
+                if t:
+                    text = t[:500]
+                    break
+        if text:
+            session_log(f"  [TOOL_RESULT] {tool_id} {status}: {text}")
+        else:
+            session_log(f"  [TOOL_UPDATE] {tool_id} -> {status}")
+
+    elif kind == "user_message_chunk":
+        pass
+
+    elif kind:
+        raw_snippet = json.dumps(update, ensure_ascii=False, default=str)[:300]
+        session_log(f"  [{kind}] {raw_snippet}")
 
 
 # ---------------------------------------------------------------------------
@@ -295,23 +410,50 @@ class Bridge:
     """Main bridge that reads Symphony app-server JSON-RPC from stdin and
     translates to ACP calls on the ``ACPClient``."""
 
-    def __init__(self) -> None:
-        self.acp = ACPClient()
-        # Maps Symphony thread IDs → ACP session IDs.
+    def __init__(self, *, model: str | None = None) -> None:
+        self.acp = ACPClient(model=model)
         self.thread_sessions: dict[str, str] = {}
+        self._mcp_server_path = _resolve_mcp_server_path()
 
     def start(self) -> None:
         """Start the ACP child process and perform the handshake."""
         self.acp.start()
         try:
-            self.acp.initialize()
+            init_result = self.acp.initialize()
+            session_log(f"[INIT] initialize result: {json.dumps(init_result, ensure_ascii=False, default=str)[:500]}")
         except Exception as exc:
             log(f"ACP initialization failed: {exc}")
             self.acp.stop()
             raise
 
+        try:
+            auth_result = self.acp.authenticate()
+            session_log(f"[INIT] authenticate result: {json.dumps(auth_result, ensure_ascii=False, default=str)[:500]}")
+        except Exception as exc:
+            log(f"ACP authenticate failed (non-fatal, may already be logged in): {exc}")
+
     def stop(self) -> None:
         self.acp.stop()
+
+    def _build_mcp_servers(self) -> list:
+        """Build MCP server config for injection into ACP sessions."""
+        servers = []
+
+        if os.environ.get("LINEAR_API_KEY"):
+            env_vars = [
+                {"name": "LINEAR_API_KEY", "value": os.environ["LINEAR_API_KEY"]},
+            ]
+            servers.append({
+                "name": "symphony-linear",
+                "command": self._mcp_server_path,
+                "args": [],
+                "env": env_vars,
+            })
+            session_log(f"[MCP] will inject symphony-linear from {self._mcp_server_path}")
+        else:
+            session_log("[MCP] LINEAR_API_KEY not set, skipping linear MCP server")
+
+        return servers
 
     # -- Symphony message handlers -----------------------------------------
 
@@ -324,9 +466,12 @@ class Bridge:
         params = msg.get("params", {})
         cwd = params.get("cwd", os.getcwd())
 
+        mcp_servers = self._build_mcp_servers()
+
         try:
-            session_id = self.acp.new_session(cwd)
+            session_id = self.acp.new_session(cwd, mcp_servers)
         except Exception as exc:
+            session_log(f"[SESSION] new_session FAILED: {exc}")
             send_response({
                 "id": msg["id"],
                 "error": {
@@ -338,6 +483,7 @@ class Bridge:
 
         thread_id = f"cursor-thread-{uuid.uuid4().hex[:12]}"
         self.thread_sessions[thread_id] = session_id
+        session_log(f"[SESSION] created thread={thread_id} acp_session={session_id} cwd={cwd} mcp_count={len(mcp_servers)}")
 
         send_response({
             "id": msg["id"],
@@ -349,7 +495,6 @@ class Bridge:
         params = msg.get("params", {})
         turn_id = f"cursor-turn-{uuid.uuid4().hex[:12]}"
 
-        # Build prompt text from the input array.
         prompt = ""
         for item in params.get("input", []):
             if isinstance(item, dict) and item.get("type") == "text":
@@ -359,10 +504,10 @@ class Bridge:
         session_id = self.thread_sessions.get(thread_id) if thread_id else None
 
         if not session_id:
-            # No session for this thread — try to create one on the fly.
             cwd = params.get("cwd", os.getcwd())
+            mcp_servers = self._build_mcp_servers()
             try:
-                session_id = self.acp.new_session(cwd)
+                session_id = self.acp.new_session(cwd, mcp_servers)
                 if thread_id:
                     self.thread_sessions[thread_id] = session_id
             except Exception as exc:
@@ -373,13 +518,13 @@ class Bridge:
                 })
                 return
 
-        # Acknowledge the turn immediately.
         send_response({
             "id": msg["id"],
             "result": {"turn": {"id": turn_id}},
         })
 
-        # Send the prompt to ACP and wait for completion.
+        session_log(f"[TURN] start turn={turn_id} prompt={prompt[:200]}...")
+
         try:
             if not self.acp.is_alive:
                 self._restart_acp()
@@ -387,6 +532,7 @@ class Bridge:
             result = self.acp.prompt(session_id, prompt, timeout=3600)
 
             stop_reason = result.get("stopReason", "") if isinstance(result, dict) else ""
+            session_log(f"[TURN] finished turn={turn_id} stopReason={stop_reason}")
             if stop_reason == "end_turn":
                 send_response({"method": "turn/completed"})
             elif stop_reason == "cancelled":
@@ -401,10 +547,10 @@ class Bridge:
                     "params": {"error": f"ACP session error: {error_detail}"},
                 })
             else:
-                # Treat any other stop reason as successful completion.
                 send_response({"method": "turn/completed"})
 
         except Exception as exc:
+            session_log(f"[TURN] error turn={turn_id}: {exc}")
             send_response({
                 "method": "turn/failed",
                 "params": {"error": f"ACP prompt failed: {exc}"},
@@ -418,6 +564,10 @@ class Bridge:
         try:
             self.acp.start()
             self.acp.initialize()
+            try:
+                self.acp.authenticate()
+            except Exception as exc:
+                log(f"ACP authenticate failed on restart (non-fatal): {exc}")
             log("ACP process restarted successfully")
         except Exception as exc:
             log(f"ACP restart failed: {exc}")
@@ -442,15 +592,12 @@ class Bridge:
             if method == "initialize":
                 self.handle_initialize(msg)
             elif method == "initialized":
-                # Notification — no response required.
                 pass
             elif method == "thread/start":
                 self.handle_thread_start(msg)
             elif method == "turn/start":
                 self.handle_turn_start(msg)
             else:
-                # Unknown method — return error for requests, ignore
-                # notifications.
                 if "id" in msg:
                     send_response({
                         "id": msg["id"],
@@ -466,7 +613,21 @@ class Bridge:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    bridge = Bridge()
+    parser = argparse.ArgumentParser(
+        description="Symphony ↔ Cursor ACP protocol bridge",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("CURSOR_MODEL"),
+        help="Model to pass to the Cursor agent CLI (overrides CURSOR_MODEL env var)",
+    )
+    args = parser.parse_args()
+
+    model = args.model
+    if model:
+        log(f"Using model: {model}")
+
+    bridge = Bridge(model=model)
 
     def _shutdown(signum, frame):
         bridge.stop()
@@ -478,8 +639,6 @@ def main() -> None:
         bridge.start()
     except Exception as exc:
         log(f"Fatal: failed to start ACP bridge: {exc}")
-        # Fall through — the bridge will emit turn/failed for any turns that
-        # arrive since the ACP process is not running.
 
     try:
         bridge.run()

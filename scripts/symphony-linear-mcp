@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""
+symphony-linear-mcp — MCP stdio server exposing Symphony's Linear tools.
+
+Provides ``linear_graphql`` and ``sync_workpad`` tools over the Model Context
+Protocol so that ACP-based agents (e.g. Cursor) can interact with Linear the
+same way the native Codex app-server does.
+
+Expects LINEAR_API_KEY in the environment.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.request
+
+LINEAR_API_URL = "https://api.linear.app/graphql"
+
+
+def _send(msg: dict) -> None:
+    sys.stdout.write(json.dumps(msg, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def _respond(req_id, result):
+    _send({"jsonrpc": "2.0", "id": req_id, "result": result})
+
+
+def _respond_error(req_id, code, message):
+    _send({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
+
+
+def _linear_graphql(query: str, variables: dict | None = None) -> dict:
+    # Intentionally duplicated from symphony-linear-cli: scripts are
+    # symlinked into ~/.local/bin and cannot share imports reliably.
+    api_key = os.environ.get("LINEAR_API_KEY", "")
+    if not api_key:
+        return {"error": "LINEAR_API_KEY not set in environment"}
+
+    payload = {"query": query}
+    if variables:
+        payload["variables"] = variables
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        LINEAR_API_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": api_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}: {e.read().decode()[:500]}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+TOOLS = [
+    {
+        "name": "linear_graphql",
+        "description": (
+            "Execute a raw GraphQL query or mutation against Linear. "
+            "Use this to read/update issues, comments, states, labels, "
+            "attachments, etc."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "GraphQL query or mutation document.",
+                },
+                "variables": {
+                    "type": "object",
+                    "description": "Optional GraphQL variables.",
+                    "additionalProperties": True,
+                },
+            },
+        },
+    },
+    {
+        "name": "sync_workpad",
+        "description": (
+            "Create or update a workpad comment on a Linear issue. "
+            "Pass the comment body directly."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["issue_id", "body"],
+            "properties": {
+                "issue_id": {
+                    "type": "string",
+                    "description": "Linear issue UUID or identifier (e.g. 'ENG-123').",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Markdown body for the comment.",
+                },
+                "comment_id": {
+                    "type": "string",
+                    "description": "Existing comment ID to update. Omit to create.",
+                },
+            },
+        },
+    },
+]
+
+
+def handle_initialize(req_id, _params):
+    _respond(req_id, {
+        "protocolVersion": "2024-11-05",
+        "capabilities": {"tools": {}},
+        "serverInfo": {
+            "name": "symphony-linear-mcp",
+            "version": "1.0.0",
+        },
+    })
+
+
+def handle_tools_list(req_id, _params):
+    _respond(req_id, {"tools": TOOLS})
+
+
+def handle_tools_call(req_id, params):
+    name = params.get("name", "")
+    args = params.get("arguments", {})
+
+    if name == "linear_graphql":
+        query = args.get("query", "")
+        variables = args.get("variables")
+        if not query:
+            _respond(req_id, {
+                "content": [{"type": "text", "text": "Error: query is required"}],
+                "isError": True,
+            })
+            return
+        result = _linear_graphql(query, variables)
+        _respond(req_id, {
+            "content": [{"type": "text", "text": json.dumps(result, indent=2, ensure_ascii=False)}],
+        })
+
+    elif name == "sync_workpad":
+        issue_id = args.get("issue_id", "")
+        body = args.get("body", "")
+        comment_id = args.get("comment_id")
+
+        if not issue_id or not body:
+            _respond(req_id, {
+                "content": [{"type": "text", "text": "Error: issue_id and body are required"}],
+                "isError": True,
+            })
+            return
+
+        if comment_id:
+            query = 'mutation($id: String!, $body: String!) { commentUpdate(id: $id, input: { body: $body }) { success comment { id url } } }'
+            variables = {"id": comment_id, "body": body}
+        else:
+            query = 'mutation($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success comment { id url } } }'
+            variables = {"issueId": issue_id, "body": body}
+
+        result = _linear_graphql(query, variables)
+        _respond(req_id, {
+            "content": [{"type": "text", "text": json.dumps(result, indent=2, ensure_ascii=False)}],
+        })
+
+    else:
+        _respond_error(req_id, -32601, f"Unknown tool: {name}")
+
+
+HANDLERS = {
+    "initialize": handle_initialize,
+    "tools/list": handle_tools_list,
+    "tools/call": handle_tools_call,
+}
+
+
+def main():
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        method = msg.get("method")
+        req_id = msg.get("id")
+
+        if method == "notifications/initialized":
+            continue
+
+        handler = HANDLERS.get(method)
+        if handler and req_id is not None:
+            handler(req_id, msg.get("params", {}))
+        elif req_id is not None:
+            _respond_error(req_id, -32601, f"Method not found: {method}")
+
+
+if __name__ == "__main__":
+    main()

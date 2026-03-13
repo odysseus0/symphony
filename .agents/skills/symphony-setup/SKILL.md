@@ -20,6 +20,10 @@ Run these checks first and **stop if any fail** — resolve before continuing:
    - Codex: `codex mcp add linear --url https://mcp.linear.app/mcp`
    - Other clients: see [Linear MCP docs](https://linear.app/docs/mcp)
 6. **Git clone auth** — the `after_create` hook runs `git clone` unattended. Verify the user's repo clone URL works non-interactively: `git clone --depth 1 <url> /tmp/test-clone && rm -rf /tmp/test-clone`. HTTPS with password prompts will silently fail. Use SSH keys (no passphrase) or HTTPS with credential helper / token.
+7. **Cursor agent (optional)** — if the user wants to use Cursor as an agent backend in addition to (or instead of) Codex:
+   - Run `agent --version` to check the Cursor CLI is installed (typically at `~/.local/bin/agent`). If missing, tell the user to install it from Cursor settings.
+   - Run `agent login` if not already authenticated, or verify `CURSOR_API_KEY` is set.
+   - Run `which cursor-symphony-bridge` — if not found, `mix symphony.install` (in the Build step) will create it automatically.
 
 Report results to the user before proceeding.
 
@@ -33,6 +37,15 @@ cd symphony/elixir
 mise trust && mise install
 mise exec -- mix setup
 mise exec -- mix build
+```
+
+`mix setup` runs `deps.get` → `escript.build` → `symphony.install`. The last step symlinks agent bridge scripts (`cursor-symphony-bridge`, `symphony-linear-cli`) into `~/.local/bin/` so they are available on PATH.
+
+After build, verify the scripts are installed:
+
+```bash
+which cursor-symphony-bridge && echo "cursor bridge OK"
+which symphony-linear-cli && echo "linear CLI OK"
 ```
 
 Note: `mise install` downloads precompiled Erlang/Elixir if available for the platform. If not, it compiles from source — this can take 10-20 minutes. Let the user know before starting.
@@ -116,6 +129,39 @@ hooks:
 
 **Leave everything else as-is.** Sandbox, approval_policy, polling interval, and concurrency settings all have good defaults in the fork.
 
+## Cursor agent setup (optional)
+
+If the user wants Cursor as an agent backend (in addition to or instead of Codex), add this to the WORKFLOW.md frontmatter. The template already includes the configuration — just verify it is present:
+
+```yaml
+agents:
+  codex:
+    command: codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh --model gpt-5.3-codex app-server
+    approval_policy: never
+    thread_sandbox: danger-full-access
+    turn_sandbox_policy:
+      type: dangerFullAccess
+  cursor:
+    command: cursor-symphony-bridge
+    approval_policy: never
+    thread_sandbox: danger-full-access
+routing:
+  default_agent: codex
+  by_label:
+    use-cursor: cursor
+```
+
+With this configuration, tickets labeled `use-cursor` in Linear are dispatched to the Cursor agent. All others use Codex by default.
+
+The WORKFLOW.md prompt already includes a "Linear access" section that tells the agent to fall back to `symphony-linear-cli` (a shell command) when the native `linear_graphql` tool is unavailable. This is essential for the Cursor agent, which does not receive Symphony's dynamic tools.
+
+Verify the Cursor agent is ready:
+
+1. `cursor-symphony-bridge` is on PATH (installed by `mix setup`).
+2. `symphony-linear-cli` is on PATH (installed by `mix setup`).
+3. `LINEAR_API_KEY` is set in the shell environment that runs Symphony.
+4. `agent` CLI (Cursor) is installed and authenticated.
+
 ## App launch skill (if applicable)
 
 If the user's project has a UI or app that needs runtime testing, create `.agents/skills/launch-app/SKILL.md` in their repo:
@@ -169,6 +215,13 @@ Have the user push a test ticket to Todo in Linear. Watch for the first worker t
 - [ ] Repo clone URL works non-interactively?
 - [ ] `.agents/skills/` and `WORKFLOW.md` pushed to remote?
 - [ ] Custom Linear states (Rework, Human Review, Merging) added?
+
+To verify the Cursor agent specifically, add the `use-cursor` label to a test ticket. Extra checklist:
+
+- [ ] `cursor-symphony-bridge` on PATH? (`which cursor-symphony-bridge`)
+- [ ] `symphony-linear-cli` on PATH? (`which symphony-linear-cli`)
+- [ ] Cursor CLI `agent` authenticated? (`agent --version`)
+- [ ] Bridge logs at `~/.cache/symphony-logs/bridge-*.log` show session activity?
 
 ## Getting started after setup
 
