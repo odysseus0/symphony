@@ -173,15 +173,25 @@ defmodule SymphonyElixir.CLI do
 
   defp store_symphony_root do
     script_name = :escript.script_name() |> to_string()
+    cwd = File.cwd!()
 
-    if script_name != "" and not String.starts_with?(script_name, "-") do
-      root =
-        script_name
-        |> Path.expand()
-        |> Path.dirname()
-        |> Path.dirname()
+    cond do
+      script_name != "" and not String.starts_with?(script_name, "-") ->
+        root =
+          script_name
+          |> Path.expand()
+          |> Path.dirname()
+          |> Path.dirname()
 
-      Application.put_env(:symphony_elixir, :symphony_root, root)
+        Application.put_env(:symphony_elixir, :symphony_root, root)
+
+      true ->
+        parent = Path.dirname(cwd)
+        scripts_dir = Path.join(parent, "scripts")
+
+        if File.dir?(scripts_dir) do
+          Application.put_env(:symphony_elixir, :symphony_root, parent)
+        end
     end
   end
 
