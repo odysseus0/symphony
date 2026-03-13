@@ -63,7 +63,7 @@ def handle_turn_start(msg: dict) -> None:
     # Run the cursor-agent CLI.
     try:
         result = subprocess.run(
-            ["cursor-agent", "-p", "--trust", prompt],
+            ["cursor-agent", "-p", "--force", "--workspace", cwd, prompt],
             cwd=cwd,
             capture_output=True,
             text=True,
