@@ -190,7 +190,6 @@ defmodule SymphonyElixir.Codex.AppServer do
           [
             :binary,
             :exit_status,
-            :stderr_to_stdout,
             env: port_environment(workspace),
             args: [~c"-lc", String.to_charlist(agent_config.command)],
             cd: String.to_charlist(workspace),
