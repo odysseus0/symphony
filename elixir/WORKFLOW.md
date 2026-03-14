@@ -25,10 +25,18 @@ hooks:
     fi
   before_remove: |
     branch=$(git branch --show-current 2>/dev/null)
-    if [ -n "$branch" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-      gh pr list --head "$branch" --state open --json number --jq '.[].number' | while read -r pr; do
-        [ -n "$pr" ] && gh pr close "$pr" --comment "Closing because the Linear issue for branch $branch entered a terminal state without merge."
-      done
+    if [ -n "$branch" ] && [ "$branch" != "main" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+      open_prs=$(gh pr list --head "$branch" --state open --json number --jq '.[].number')
+      if [ -n "$open_prs" ]; then
+        echo "$open_prs" | while read -r pr; do
+          [ -n "$pr" ] && gh pr close "$pr" --comment "Closing because the Linear issue for branch $branch entered a terminal state without merge."
+        done
+      fi
+      # Clean up remote branch if no open/merged PR references it
+      merged_prs=$(gh pr list --head "$branch" --state merged --json number --jq 'length')
+      if [ "${merged_prs:-0}" = "0" ]; then
+        git push origin --delete "$branch" 2>/dev/null || true
+      fi
     fi
 agent:
   max_concurrent_agents: 10
