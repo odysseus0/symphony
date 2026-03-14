@@ -11,6 +11,12 @@ defmodule SymphonyElixir.Tracker do
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
 
+  @doc "Returns dynamic tool specifications for the Codex agent."
+  @callback tool_specs() :: [map()]
+
+  @doc "Executes a dynamic tool call from the Codex agent."
+  @callback execute_tool(String.t(), map(), keyword()) :: map()
+
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
     adapter().fetch_candidate_issues()
@@ -36,10 +42,21 @@ defmodule SymphonyElixir.Tracker do
     adapter().update_issue_state(issue_id, state_name)
   end
 
+  @spec tool_specs() :: [map()]
+  def tool_specs do
+    adapter().tool_specs()
+  end
+
+  @spec execute_tool(String.t(), map(), keyword()) :: map()
+  def execute_tool(tool, arguments, opts \\ []) do
+    adapter().execute_tool(tool, arguments, opts)
+  end
+
   @spec adapter() :: module()
   def adapter do
     case Config.settings!().tracker.kind do
       "memory" -> SymphonyElixir.Tracker.Memory
+      "plane" -> SymphonyElixir.Plane.Adapter
       _ -> SymphonyElixir.Linear.Adapter
     end
   end

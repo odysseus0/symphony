@@ -658,14 +658,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_dispatch_issue(%State{} = state, issue, attempt) do
     recipient = self()
+    runtime = Config.resolve_runtime_for_issue(issue)
+
+    Logger.info("Selected runtime=#{runtime.name} for #{issue_context(issue)}")
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt)
+           AgentRunner.run(issue, recipient, attempt: attempt, runtime: runtime)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
-        Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
+        Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} runtime=#{runtime.name}")
 
         running =
           Map.put(state.running, issue.id, %{
@@ -686,7 +689,8 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
+            started_at: DateTime.utc_now(),
+            runtime_name: runtime.name
           })
 
         %{

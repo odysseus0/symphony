@@ -52,6 +52,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      # Plane-specific fields
+      field(:workspace_slug, :string)
+      field(:project_id, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -59,7 +62,8 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states,
+         :workspace_slug, :project_id],
         empty_values: []
       )
     end
@@ -180,6 +184,62 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Runtime do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:name, :string)
+      field(:command, :string, default: "codex app-server")
+      field(:labels, {:array, :string}, default: [])
+      field(:max_turns, :integer)
+
+      field(:approval_policy, StringOrMap,
+        default: %{
+          "reject" => %{
+            "sandbox_approval" => true,
+            "rules" => true,
+            "mcp_elicitations" => true
+          }
+        }
+      )
+
+      field(:thread_sandbox, :string, default: "workspace-write")
+      field(:turn_sandbox_policy, :map)
+      field(:turn_timeout_ms, :integer, default: 3_600_000)
+      field(:read_timeout_ms, :integer, default: 5_000)
+      field(:stall_timeout_ms, :integer, default: 300_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :name,
+          :command,
+          :labels,
+          :max_turns,
+          :approval_policy,
+          :thread_sandbox,
+          :turn_sandbox_policy,
+          :turn_timeout_ms,
+          :read_timeout_ms,
+          :stall_timeout_ms
+        ],
+        empty_values: []
+      )
+      |> validate_required([:name, :command])
+      |> validate_number(:max_turns, greater_than: 0)
+      |> validate_number(:turn_timeout_ms, greater_than: 0)
+      |> validate_number(:read_timeout_ms, greater_than: 0)
+      |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -248,6 +308,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_many(:runtimes, Runtime, on_replace: :delete)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -292,6 +353,21 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  @spec resolve_runtime_for_issue(%{labels: [String.t()]}, [Runtime.t()]) :: Runtime.t()
+  def resolve_runtime_for_issue(issue, runtimes) when is_list(runtimes) do
+    issue_labels =
+      (Map.get(issue, :labels) || [])
+      |> MapSet.new(&String.downcase/1)
+
+    labeled =
+      Enum.find(runtimes, fn rt ->
+        rt.labels != [] and
+          Enum.any?(rt.labels, fn l -> MapSet.member?(issue_labels, String.downcase(l)) end)
+      end)
+
+    labeled || Enum.find(runtimes, fn rt -> rt.labels == [] end) || List.first(runtimes)
+  end
+
   @spec normalize_issue_state(String.t()) :: String.t()
   def normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(state_name)
@@ -334,16 +410,34 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:runtimes, with: &Runtime.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 
   defp finalize_settings(settings) do
+    api_key_fallback =
+      case settings.tracker.kind do
+        "plane" -> System.get_env("PLANE_API_KEY")
+        _ -> System.get_env("LINEAR_API_KEY")
+      end
+
+    endpoint =
+      case settings.tracker.kind do
+        "plane" ->
+          resolve_secret_setting(settings.tracker.endpoint, System.get_env("PLANE_BASE_URL")) ||
+            "http://localhost"
+
+        _ ->
+          settings.tracker.endpoint
+      end
+
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
+      | api_key: resolve_secret_setting(settings.tracker.api_key, api_key_fallback),
+        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE")),
+        endpoint: endpoint
     }
 
     workspace = %{
@@ -357,8 +451,29 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    runtimes = finalize_runtimes(settings.runtimes, codex)
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, runtimes: runtimes}
   end
+
+  defp finalize_runtimes([], codex) do
+    [
+      %Runtime{
+        name: "default",
+        command: codex.command,
+        labels: [],
+        max_turns: nil,
+        approval_policy: codex.approval_policy,
+        thread_sandbox: codex.thread_sandbox,
+        turn_sandbox_policy: codex.turn_sandbox_policy,
+        turn_timeout_ms: codex.turn_timeout_ms,
+        read_timeout_ms: codex.read_timeout_ms,
+        stall_timeout_ms: codex.stall_timeout_ms
+      }
+    ]
+  end
+
+  defp finalize_runtimes(runtimes, _codex) when is_list(runtimes), do: runtimes
 
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->

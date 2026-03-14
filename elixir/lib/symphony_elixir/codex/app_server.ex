@@ -21,12 +21,14 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
           thread_id: String.t(),
-          workspace: Path.t()
+          workspace: Path.t(),
+          turn_timeout_ms: pos_integer(),
+          read_timeout_ms: pos_integer()
         }
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace) do
+    with {:ok, session} <- start_session(workspace, opts) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -35,10 +37,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  @spec start_session(Path.t()) :: {:ok, session()} | {:error, term()}
-  def start_session(workspace) do
+  @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
+  def start_session(workspace, opts \\ []) do
+    codex = Config.settings!().codex
+    command = Keyword.get(opts, :command, codex.command)
+    turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, codex.turn_timeout_ms)
+    read_timeout_ms = Keyword.get(opts, :read_timeout_ms, codex.read_timeout_ms)
+
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace),
-         {:ok, port} <- start_port(expanded_workspace) do
+         {:ok, port} <- start_port(expanded_workspace, command) do
       metadata = port_metadata(port)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace),
@@ -52,7 +59,9 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
-           workspace: expanded_workspace
+           workspace: expanded_workspace,
+           turn_timeout_ms: turn_timeout_ms,
+           read_timeout_ms: read_timeout_ms
          }}
       else
         {:error, reason} ->
@@ -71,8 +80,10 @@ defmodule SymphonyElixir.Codex.AppServer do
           auto_approve_requests: auto_approve_requests,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
-          workspace: workspace
-        },
+          workspace: workspace,
+          turn_timeout_ms: turn_timeout_ms,
+          read_timeout_ms: _read_timeout_ms
+        } = _session,
         prompt,
         issue,
         opts \\ []
@@ -100,7 +111,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests, turn_timeout_ms) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -168,7 +179,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace) do
+  defp start_port(workspace, command) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -181,7 +192,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
+            args: [~c"-lc", String.to_charlist(command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -285,11 +296,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, turn_timeout_ms) do
     receive_loop(
       port,
       on_message,
-      Config.settings!().codex.turn_timeout_ms,
+      turn_timeout_ms,
       "",
       tool_executor,
       auto_approve_requests

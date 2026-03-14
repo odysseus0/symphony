@@ -47,6 +47,22 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec tool_specs() :: [map()]
+  def tool_specs, do: []
+
+  @spec execute_tool(String.t(), map(), keyword()) :: map()
+  def execute_tool(tool, _arguments, _opts) do
+    %{
+      "success" => false,
+      "contentItems" => [
+        %{
+          "type" => "inputText",
+          "text" => Jason.encode!(%{"error" => %{"message" => "Memory tracker does not support dynamic tool: #{tool}"}})
+        }
+      ]
+    }
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

@@ -61,6 +61,11 @@ defmodule SymphonyElixir.Config do
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
 
+  @spec resolve_runtime_for_issue(map()) :: Schema.Runtime.t()
+  def resolve_runtime_for_issue(issue) do
+    Schema.resolve_runtime_for_issue(issue, settings!().runtimes)
+  end
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
@@ -118,7 +123,7 @@ defmodule SymphonyElixir.Config do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
+      settings.tracker.kind not in ["linear", "plane", "memory"] ->
         {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
 
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
@@ -126,6 +131,15 @@ defmodule SymphonyElixir.Config do
 
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
+
+      settings.tracker.kind == "plane" and not is_binary(settings.tracker.api_key) ->
+        {:error, :missing_plane_api_token}
+
+      settings.tracker.kind == "plane" and not is_binary(settings.tracker.workspace_slug) ->
+        {:error, :missing_plane_workspace_slug}
+
+      settings.tracker.kind == "plane" and not is_binary(settings.tracker.project_id) ->
+        {:error, :missing_plane_project_id}
 
       true ->
         :ok

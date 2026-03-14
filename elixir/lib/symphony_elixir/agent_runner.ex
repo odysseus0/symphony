@@ -52,16 +52,34 @@ defmodule SymphonyElixir.AgentRunner do
   defp send_codex_update(_recipient, _issue, _message), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts) do
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+    runtime = Keyword.get(opts, :runtime)
+    default_max_turns = Config.settings!().agent.max_turns
+    max_turns = runtime_max_turns(runtime, default_max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace) do
+    session_opts = runtime_session_opts(runtime)
+
+    with {:ok, session} <- AppServer.start_session(workspace, session_opts) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns, 0)
       after
         AppServer.stop_session(session)
       end
     end
+  end
+
+  defp runtime_max_turns(nil, default), do: default
+  defp runtime_max_turns(%{max_turns: mt}, _default) when is_integer(mt) and mt > 0, do: mt
+  defp runtime_max_turns(_runtime, default), do: default
+
+  defp runtime_session_opts(nil), do: []
+
+  defp runtime_session_opts(runtime) do
+    [
+      command: runtime.command,
+      turn_timeout_ms: runtime.turn_timeout_ms,
+      read_timeout_ms: runtime.read_timeout_ms
+    ]
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, consecutive_empty) do
@@ -90,7 +108,7 @@ defmodule SymphonyElixir.AgentRunner do
             :ok
           else
             if empty_turn? do
-              backoff_ms = @empty_turn_backoff_base_ms * (1 <<< min(next_consecutive_empty - 1, 4))
+              backoff_ms = @empty_turn_backoff_base_ms * Bitwise.bsl(1, min(next_consecutive_empty - 1, 4))
               Logger.info("Empty turn detected for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{max_turns}; backing off #{backoff_ms}ms")
               Process.sleep(backoff_ms)
             end
