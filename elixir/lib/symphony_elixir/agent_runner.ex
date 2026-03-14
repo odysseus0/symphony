@@ -3,9 +3,14 @@ defmodule SymphonyElixir.AgentRunner do
   Executes a single Linear issue in its workspace with Codex.
   """
 
+  import Bitwise, only: [<<<: 2]
   require Logger
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+
+  @empty_turn_threshold_ms 5_000
+  @max_consecutive_empty_turns 3
+  @empty_turn_backoff_base_ms 2_000
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
@@ -20,7 +25,9 @@ defmodule SymphonyElixir.AgentRunner do
           else
             {:error, reason} ->
               Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-              raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+
+              raise RuntimeError,
+                    "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
           end
         after
           Workspace.run_after_run_hook(workspace, issue)
@@ -48,18 +55,41 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+
+    issue_state_fetcher =
+      Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, session} <- AppServer.start_session(workspace) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(
+          session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          1,
+          max_turns,
+          0
+        )
       after
         AppServer.stop_session(session)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns,
+         consecutive_empty
+       ) do
+    turn_start_ms = System.monotonic_time(:millisecond)
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
@@ -69,22 +99,45 @@ defmodule SymphonyElixir.AgentRunner do
              issue,
              on_message: codex_message_handler(codex_update_recipient, issue)
            ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+      turn_elapsed_ms = System.monotonic_time(:millisecond) - turn_start_ms
+      empty_turn? = turn_elapsed_ms < @empty_turn_threshold_ms
+
+      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns} elapsed_ms=#{turn_elapsed_ms}")
 
       case continue_with_issue?(issue, issue_state_fetcher) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+          next_consecutive_empty = if empty_turn?, do: consecutive_empty + 1, else: 0
 
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
+          if next_consecutive_empty >= @max_consecutive_empty_turns do
+            Logger.warning(
+              "Empty turn circuit breaker: #{next_consecutive_empty} consecutive empty turns (<#{@empty_turn_threshold_ms}ms) for #{issue_context(refreshed_issue)}; returning control to orchestrator"
+            )
+
+            :ok
+          else
+            if empty_turn? do
+              backoff_ms =
+                @empty_turn_backoff_base_ms * (1 <<< min(next_consecutive_empty - 1, 4))
+
+              Logger.info("Empty turn detected for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{max_turns}; backing off #{backoff_ms}ms")
+
+              Process.sleep(backoff_ms)
+            end
+
+            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+            do_run_codex_turns(
+              app_session,
+              workspace,
+              refreshed_issue,
+              codex_update_recipient,
+              opts,
+              issue_state_fetcher,
+              turn_number + 1,
+              max_turns,
+              next_consecutive_empty
+            )
+          end
 
         {:continue, refreshed_issue} ->
           Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
@@ -114,7 +167,8 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher)
+       when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         if active_issue_state?(refreshed_issue.state) do
