@@ -95,12 +95,16 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      field(:cleanup_keep_recent, :integer, default: 5)
+      field(:warning_threshold_bytes, :integer, default: 10 * 1024 * 1024 * 1024)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:root], empty_values: [])
+      |> cast(attrs, [:root, :cleanup_keep_recent, :warning_threshold_bytes], empty_values: [])
+      |> validate_number(:cleanup_keep_recent, greater_than_or_equal_to: 0)
+      |> validate_number(:warning_threshold_bytes, greater_than: 0)
     end
   end
 

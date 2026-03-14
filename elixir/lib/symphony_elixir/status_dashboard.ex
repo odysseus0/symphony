@@ -319,6 +319,7 @@ defmodule SymphonyElixir.StatusDashboard do
              codex_totals: codex_totals,
              stats: Map.get(snapshot, :stats),
              rate_limits: Map.get(snapshot, :rate_limits),
+             workspace: Map.get(snapshot, :workspace),
              polling: Map.get(snapshot, :polling)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
@@ -338,8 +339,10 @@ defmodule SymphonyElixir.StatusDashboard do
         rate_limits = Map.get(snapshot, :rate_limits)
         stats = Map.get(snapshot, :stats)
         stats_lines = format_stats_lines(stats)
+        workspace = Map.get(snapshot, :workspace)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
+        workspace_line = format_workspace_usage_lines(workspace)
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
         codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
@@ -366,6 +369,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("out #{format_count(codex_output_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
+           workspace_line,
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            stats_lines,
            project_link_lines,
@@ -471,6 +475,45 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_ms_stat(value) when is_integer(value), do: "#{format_count(value)}ms"
   defp format_ms_stat(_value), do: "n/a"
 
+  defp format_workspace_usage_line(%{usage_bytes: usage_bytes} = workspace)
+       when is_integer(usage_bytes) and usage_bytes >= 0 do
+    threshold_bytes = Map.get(workspace, :warning_threshold_bytes)
+    keep_recent = Map.get(workspace, :done_closed_keep_count) || Map.get(workspace, :cleanup_keep_recent)
+    exceeded? = is_integer(threshold_bytes) and threshold_bytes > 0 and usage_bytes > threshold_bytes
+
+    usage_color =
+      if exceeded? do
+        @ansi_orange
+      else
+        @ansi_cyan
+      end
+
+    threshold_text =
+      case threshold_bytes do
+        value when is_integer(value) and value > 0 -> format_bytes(value)
+        _ -> "n/a"
+      end
+
+    keep_text =
+      case keep_recent do
+        value when is_integer(value) and value >= 0 -> Integer.to_string(value)
+        _ -> "n/a"
+      end
+
+    colorize("│ Workspace disk: ", @ansi_bold) <>
+      colorize(format_bytes(usage_bytes), usage_color) <>
+      colorize(" (warn #{threshold_text}, keep #{keep_text})", @ansi_gray)
+  end
+
+  defp format_workspace_usage_line(_workspace), do: nil
+
+  defp format_workspace_usage_lines(workspace) do
+    case format_workspace_usage_line(workspace) do
+      nil -> []
+      line -> [line]
+    end
+  end
+
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
 
   defp dashboard_url do
@@ -507,6 +550,29 @@ defmodule SymphonyElixir.StatusDashboard do
       true ->
         trimmed_host
     end
+  end
+
+  defp format_bytes(bytes) when is_integer(bytes) and bytes < 1024 do
+    "#{bytes} B"
+  end
+
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1024 do
+    units = ["KB", "MB", "GB", "TB", "PB"]
+    format_scaled_bytes(bytes / 1024.0, units)
+  end
+
+  defp format_bytes(_bytes), do: "n/a"
+
+  defp format_scaled_bytes(value, [unit]) do
+    :erlang.float_to_binary(value, decimals: 2) <> " " <> unit
+  end
+
+  defp format_scaled_bytes(value, [unit | _rest_units]) when value < 1024.0 do
+    :erlang.float_to_binary(value, decimals: 2) <> " " <> unit
+  end
+
+  defp format_scaled_bytes(value, [_unit | rest_units]) do
+    format_scaled_bytes(value / 1024.0, rest_units)
   end
 
   defp render_to_terminal(content) do
@@ -607,6 +673,7 @@ defmodule SymphonyElixir.StatusDashboard do
              codex_totals: codex_totals,
              stats: Map.get(snapshot, :stats),
              rate_limits: Map.get(snapshot, :rate_limits),
+             workspace: Map.get(snapshot, :workspace),
              polling: Map.get(snapshot, :polling)
            }}
 

@@ -19,6 +19,29 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     Snapshot.assert_dashboard_snapshot!("idle", render_snapshot(snapshot_data, 0.0))
   end
 
+  test "snapshot renders workspace disk usage line when workspace metrics exist" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         workspace: %{
+           usage_bytes: 2_147_483_648,
+           warning_threshold_bytes: 10_737_418_240,
+           done_closed_keep_count: 5
+         }
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+
+    assert rendered =~ "Workspace disk"
+    assert rendered =~ "2.00 GB"
+    assert rendered =~ "warn 10.00 GB"
+    assert rendered =~ "keep 5"
+  end
+
   test "snapshot fixture: idle dashboard with observability url" do
     previous_port_override = Application.get_env(:symphony_elixir, :server_port_override)
 

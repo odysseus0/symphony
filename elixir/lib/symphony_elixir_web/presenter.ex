@@ -21,7 +21,8 @@ defmodule SymphonyElixirWeb.Presenter do
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           stats: stats_payload_from_snapshot(snapshot),
-          rate_limits: snapshot.rate_limits
+          rate_limits: snapshot.rate_limits,
+          workspace: workspace_payload(Map.get(snapshot, :workspace))
         }
 
       :timeout ->
@@ -212,4 +213,32 @@ defmodule SymphonyElixirWeb.Presenter do
     stats = Map.get(snapshot, :stats) || Map.get(snapshot, "stats") || %{}
     Map.merge(default, stats)
   end
+
+  defp workspace_payload(%{} = workspace) do
+    keep_recent = Map.get(workspace, :done_closed_keep_count) || Map.get(workspace, :cleanup_keep_recent)
+
+    %{
+      usage_bytes: non_negative_integer(Map.get(workspace, :usage_bytes), 0),
+      warning_threshold_bytes:
+        positive_integer(
+          Map.get(workspace, :warning_threshold_bytes),
+          10 * 1024 * 1024 * 1024
+        ),
+      done_closed_keep_count: non_negative_integer(keep_recent, 5)
+    }
+  end
+
+  defp workspace_payload(_workspace) do
+    %{
+      usage_bytes: 0,
+      warning_threshold_bytes: 10 * 1024 * 1024 * 1024,
+      done_closed_keep_count: 5
+    }
+  end
+
+  defp non_negative_integer(value, _default) when is_integer(value) and value >= 0, do: value
+  defp non_negative_integer(_value, default), do: default
+
+  defp positive_integer(value, _default) when is_integer(value) and value > 0, do: value
+  defp positive_integer(_value, default), do: default
 end

@@ -38,6 +38,9 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :workspace_usage_bytes,
+      :workspace_usage_refresh_ref,
+      :workspace_threshold_exceeded?,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -72,6 +75,9 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      workspace_usage_bytes: 0,
+      workspace_usage_refresh_ref: nil,
+      workspace_threshold_exceeded?: false,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil,
       stats_completed_count: 0,
@@ -83,7 +89,6 @@ defmodule SymphonyElixir.Orchestrator do
       stats_finalized_issue_ids: MapSet.new()
     }
 
-    run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
 
     {:ok, state}
@@ -128,6 +133,7 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
     state = maybe_dispatch(state)
+    state = run_workspace_housekeeping(state, :poll)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
 
@@ -241,6 +247,23 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:workspace_usage_sample, refresh_ref, source, usage_result},
+        %{workspace_usage_refresh_ref: refresh_ref} = state
+      )
+      when is_reference(refresh_ref) do
+    state =
+      state
+      |> Map.put(:workspace_usage_refresh_ref, nil)
+      |> apply_workspace_usage_result(usage_result, source)
+
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  def handle_info({:workspace_usage_sample, _refresh_ref, _source, _usage_result}, state),
+    do: {:noreply, state}
 
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
@@ -871,9 +894,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
-        Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
-
-        cleanup_issue_workspace(issue.identifier)
+        Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; releasing claim")
         {:noreply, release_issue_claim(state, issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
@@ -900,21 +921,172 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_identifier), do: :ok
 
-  defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
-      {:ok, issues} ->
-        issues
-        |> Enum.each(fn
-          %Issue{identifier: identifier} when is_binary(identifier) ->
-            cleanup_issue_workspace(identifier)
+  defp run_workspace_housekeeping(%State{} = state, source) do
+    state = maybe_schedule_workspace_usage_refresh(state, source)
+    :ok = spawn_terminal_workspace_cleanup(source)
+    state
+  end
 
-          _ ->
-            :ok
-        end)
+  defp maybe_schedule_workspace_usage_refresh(
+         %State{workspace_usage_refresh_ref: refresh_ref} = state,
+         _source
+       )
+       when is_reference(refresh_ref),
+       do: state
+
+  defp maybe_schedule_workspace_usage_refresh(%State{} = state, source) do
+    refresh_ref = make_ref()
+    orchestrator = self()
+
+    Task.start(fn ->
+      usage_result = Workspace.root_usage_bytes()
+      send(orchestrator, {:workspace_usage_sample, refresh_ref, source, usage_result})
+    end)
+
+    %{state | workspace_usage_refresh_ref: refresh_ref}
+  end
+
+  defp spawn_terminal_workspace_cleanup(source) do
+    Task.start(fn ->
+      run_terminal_workspace_cleanup(source)
+    end)
+
+    :ok
+  end
+
+  defp run_terminal_workspace_cleanup(source) do
+    keep_recent = workspace_cleanup_keep_recent()
+    done_closed_states = done_closed_cleanup_states()
+
+    case Tracker.fetch_issues_by_states(done_closed_states) do
+      {:ok, issues} ->
+        {:ok, %{removed: removed}} =
+          Workspace.cleanup_completed_issue_workspaces(issues, keep_recent: keep_recent)
+
+        if removed != [] do
+          Logger.info(
+            "Workspace retention cleanup source=#{source} removed=#{length(removed)} keep_recent=#{keep_recent}"
+          )
+        end
+
+        :ok
 
       {:error, reason} ->
-        Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+        Logger.warning(
+          "Skipping terminal workspace cleanup source=#{source}; failed to fetch terminal issues: #{inspect(reason)}"
+        )
+
+        :ok
     end
+  end
+
+  defp done_closed_cleanup_states do
+    states =
+      Config.settings!().tracker.terminal_states
+      |> Enum.filter(fn state_name ->
+        normalize_state = normalize_issue_state(to_string(state_name))
+        normalize_state in ["done", "closed"]
+      end)
+      |> Enum.uniq()
+
+    if states == [] do
+      ["Done", "Closed"]
+    else
+      states
+    end
+  end
+
+  defp apply_workspace_usage_result(%State{} = state, usage_result, source) do
+    warning_threshold_bytes = workspace_warning_threshold_bytes()
+
+    case usage_result do
+      {:ok, usage_bytes} when is_integer(usage_bytes) and usage_bytes >= 0 ->
+        threshold_exceeded? = usage_exceeds_threshold?(usage_bytes, warning_threshold_bytes)
+
+        maybe_log_workspace_threshold_transition(
+          state.workspace_threshold_exceeded?,
+          threshold_exceeded?,
+          usage_bytes,
+          warning_threshold_bytes,
+          source
+        )
+
+        %{
+          state
+          | workspace_usage_bytes: usage_bytes,
+            workspace_threshold_exceeded?: threshold_exceeded?
+        }
+
+      {:error, reason} ->
+        Logger.warning("Failed to compute workspace disk usage source=#{source}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp usage_exceeds_threshold?(usage_bytes, warning_threshold_bytes)
+       when is_integer(usage_bytes) and is_integer(warning_threshold_bytes) and warning_threshold_bytes > 0 do
+    usage_bytes > warning_threshold_bytes
+  end
+
+  defp usage_exceeds_threshold?(_usage_bytes, _warning_threshold_bytes), do: false
+
+  defp maybe_log_workspace_threshold_transition(
+         previous_exceeded?,
+         true,
+         usage_bytes,
+         warning_threshold_bytes,
+         source
+       )
+       when previous_exceeded? != true do
+    Logger.warning(
+      "Workspace disk usage exceeded warning threshold source=#{source} usage_bytes=#{usage_bytes} threshold_bytes=#{warning_threshold_bytes}"
+    )
+  end
+
+  defp maybe_log_workspace_threshold_transition(
+         true,
+         false,
+         usage_bytes,
+         warning_threshold_bytes,
+         source
+       ) do
+    Logger.info(
+      "Workspace disk usage back under threshold source=#{source} usage_bytes=#{usage_bytes} threshold_bytes=#{warning_threshold_bytes}"
+    )
+  end
+
+  defp maybe_log_workspace_threshold_transition(
+         _previous_exceeded?,
+         _current_exceeded?,
+         _usage_bytes,
+         _warning_threshold_bytes,
+         _source
+       ),
+       do: :ok
+
+  defp workspace_cleanup_keep_recent do
+    case Config.settings!().workspace.cleanup_keep_recent do
+      keep_recent when is_integer(keep_recent) and keep_recent >= 0 -> keep_recent
+      _ -> 5
+    end
+  end
+
+  defp workspace_warning_threshold_bytes do
+    case Config.settings!().workspace.warning_threshold_bytes do
+      threshold when is_integer(threshold) and threshold > 0 -> threshold
+      _ -> 10 * 1024 * 1024 * 1024
+    end
+  end
+
+  defp workspace_snapshot(%State{} = state) do
+    keep_recent = workspace_cleanup_keep_recent()
+
+    %{
+      usage_bytes: max(0, state.workspace_usage_bytes || 0),
+      warning_threshold_bytes: workspace_warning_threshold_bytes(),
+      done_closed_keep_count: keep_recent,
+      cleanup_keep_recent: keep_recent
+    }
   end
 
   defp notify_dashboard do
@@ -1201,6 +1373,7 @@ defmodule SymphonyElixir.Orchestrator do
        codex_totals: state.codex_totals,
        stats: snapshot_stats(state),
        rate_limits: Map.get(state, :codex_rate_limits),
+       workspace: workspace_snapshot(state),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),

@@ -89,6 +89,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
+    assert %{
+             usage_bytes: usage_bytes,
+             warning_threshold_bytes: warning_threshold_bytes,
+             done_closed_keep_count: done_closed_keep_count
+           } = snapshot.workspace
+
+    assert is_integer(usage_bytes) and usage_bytes >= 0
+    assert is_integer(warning_threshold_bytes) and warning_threshold_bytes > 0
+    assert done_closed_keep_count == 5
     assert snapshot_entry.issue_id == issue_id
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
@@ -99,6 +108,51 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              message: %{method: "some-event"},
              timestamp: now
            }
+  end
+
+  test "orchestrator logs warning when workspace usage exceeds threshold" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-threshold-#{System.unique_integer([:positive])}"
+      )
+
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    try do
+      File.mkdir_p!(test_root)
+      File.write!(Path.join(test_root, "disk-heavy.txt"), String.duplicate("x", 2_048))
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        workspace_warning_threshold_bytes: 1,
+        workspace_cleanup_keep_recent: 5
+      )
+
+      orchestrator_name = Module.concat(__MODULE__, :WorkspaceThresholdOrchestrator)
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+          Process.sleep(250)
+
+          if Process.alive?(pid) do
+            Process.exit(pid, :normal)
+          end
+        end)
+
+      assert log =~ "Workspace disk usage exceeded warning threshold"
+    after
+      if is_nil(previous_memory_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_memory_issues)
+      end
+
+      File.rm_rf(test_root)
+    end
   end
 
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do

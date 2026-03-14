@@ -104,6 +104,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
           </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Workspace disk</p>
+            <p class="metric-value numeric"><%= format_bytes(@payload.workspace && @payload.workspace.usage_bytes) %></p>
+            <p class="metric-detail numeric">
+              Warn <%= format_bytes(@payload.workspace && @payload.workspace.warning_threshold_bytes) %>
+              · Keep recent <%= format_keep_recent(@payload.workspace && @payload.workspace.done_closed_keep_count) %>
+            </p>
+          </article>
         </section>
 
         <% stats = stats(@payload) %>
@@ -380,6 +389,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
       duration_ms: %{p50: nil, p95: nil, p99: nil},
       linear_api_response_time_ms: %{p50: nil, p95: nil}
     }
+
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 0 and bytes < 1024 do
+    "#{bytes} B"
+  end
+
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1024 do
+    bytes
+    |> Kernel./(1024)
+    |> scale_bytes(["KB", "MB", "GB", "TB", "PB"])
+  end
+
+  defp format_bytes(_bytes), do: "n/a"
+
+  defp scale_bytes(value, [unit]) do
+    :erlang.float_to_binary(value, decimals: 2) <> " " <> unit
+  end
+
+  defp scale_bytes(value, [unit | _rest_units]) when value < 1024.0 do
+    :erlang.float_to_binary(value, decimals: 2) <> " " <> unit
+  end
+
+  defp scale_bytes(value, [_unit | rest_units]), do: scale_bytes(value / 1024.0, rest_units)
+
+  defp format_keep_recent(value) when is_integer(value) and value >= 0, do: Integer.to_string(value)
+  defp format_keep_recent(_value), do: "n/a"
 
   defp state_badge_class(state) do
     base = "state-badge"

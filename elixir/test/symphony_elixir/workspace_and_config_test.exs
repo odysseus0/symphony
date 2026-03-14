@@ -295,6 +295,67 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert :ok = Workspace.remove_issue_workspaces(nil)
   end
 
+  test "workspace reports recursive disk usage bytes" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-usage-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace_root, "nested"))
+      File.write!(Path.join(workspace_root, "root.txt"), "abcd")
+      File.write!(Path.join(workspace_root, "nested/child.txt"), "123456")
+
+      assert {:ok, usage_bytes} = Workspace.total_usage_bytes(workspace_root)
+      assert usage_bytes >= 10
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace cleanup keeps the five most recent completed workspaces" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-retention-#{System.unique_integer([:positive])}"
+      )
+
+    now = DateTime.utc_now()
+
+    issues =
+      for index <- 1..7 do
+        %Issue{
+          id: "issue-#{index}",
+          identifier: "MT-#{index}",
+          state: "Done",
+          updated_at: DateTime.add(now, -index * 60, :second)
+        }
+      end
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      Enum.each(issues, fn issue ->
+        workspace = Path.join(workspace_root, issue.identifier)
+        File.mkdir_p!(workspace)
+        File.write!(Path.join(workspace, "marker.txt"), issue.identifier)
+      end)
+
+      assert {:ok, %{kept: kept, removed: removed}} =
+               Workspace.cleanup_completed_issue_workspaces(issues, keep_recent: 5)
+
+      assert kept == ["MT-1", "MT-2", "MT-3", "MT-4", "MT-5"]
+      assert removed == ["MT-6", "MT-7"]
+      assert File.exists?(Path.join(workspace_root, "MT-1"))
+      assert File.exists?(Path.join(workspace_root, "MT-5"))
+      refute File.exists?(Path.join(workspace_root, "MT-6"))
+      refute File.exists?(Path.join(workspace_root, "MT-7"))
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "linear issue helpers" do
     issue = %Issue{
       id: "abc",

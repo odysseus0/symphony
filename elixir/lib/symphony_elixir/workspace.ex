@@ -83,6 +83,33 @@ defmodule SymphonyElixir.Workspace do
     :ok
   end
 
+  @spec total_usage_bytes(Path.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def total_usage_bytes(workspace_root) when is_binary(workspace_root) do
+    usage_for_path(Path.expand(workspace_root))
+  end
+
+  def total_usage_bytes(_workspace_root), do: {:error, :invalid_workspace_root}
+
+  @spec root_usage_bytes() :: {:ok, non_neg_integer()} | {:error, term()}
+  def root_usage_bytes do
+    total_usage_bytes(Config.settings!().workspace.root)
+  end
+
+  @spec cleanup_completed_issue_workspaces([map()], keyword()) ::
+          {:ok, %{kept: [String.t()], removed: [String.t()]}}
+  def cleanup_completed_issue_workspaces(issues, opts \\ []) when is_list(issues) and is_list(opts) do
+    keep_recent = keep_recent_option(opts)
+
+    {kept, removed} =
+      issues
+      |> completed_issue_identifiers_sorted()
+      |> Enum.split(keep_recent)
+
+    Enum.each(removed, &remove_issue_workspaces/1)
+
+    {:ok, %{kept: kept, removed: removed}}
+  end
+
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil) :: :ok | {:error, term()}
   def run_before_run_hook(workspace, issue_or_identifier) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
@@ -120,6 +147,93 @@ defmodule SymphonyElixir.Workspace do
 
   defp safe_identifier(identifier) do
     String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
+  end
+
+  defp keep_recent_option(opts) when is_list(opts) do
+    case Keyword.get(opts, :keep_recent, Config.settings!().workspace.cleanup_keep_recent) do
+      keep_recent when is_integer(keep_recent) and keep_recent >= 0 -> keep_recent
+      _ -> 5
+    end
+  end
+
+  defp completed_issue_identifiers_sorted(issues) do
+    issues
+    |> Enum.flat_map(fn issue ->
+      case completed_issue_identifier(issue) do
+        identifier when is_binary(identifier) -> [{identifier, completed_issue_sort_key(issue)}]
+        _ -> []
+      end
+    end)
+    |> Enum.sort_by(fn {_identifier, sort_key} -> sort_key end, :desc)
+    |> Enum.uniq_by(fn {identifier, _sort_key} -> identifier end)
+    |> Enum.map(fn {identifier, _sort_key} -> identifier end)
+  end
+
+  defp completed_issue_identifier(%{identifier: identifier})
+       when is_binary(identifier) and identifier != "" do
+    identifier
+  end
+
+  defp completed_issue_identifier(%{"identifier" => identifier})
+       when is_binary(identifier) and identifier != "" do
+    identifier
+  end
+
+  defp completed_issue_identifier(_issue), do: nil
+
+  defp completed_issue_sort_key(%{updated_at: %DateTime{} = updated_at}) do
+    DateTime.to_unix(updated_at, :millisecond)
+  end
+
+  defp completed_issue_sort_key(%{"updated_at" => %DateTime{} = updated_at}) do
+    DateTime.to_unix(updated_at, :millisecond)
+  end
+
+  defp completed_issue_sort_key(%{created_at: %DateTime{} = created_at}) do
+    DateTime.to_unix(created_at, :millisecond)
+  end
+
+  defp completed_issue_sort_key(%{"created_at" => %DateTime{} = created_at}) do
+    DateTime.to_unix(created_at, :millisecond)
+  end
+
+  defp completed_issue_sort_key(_issue), do: 0
+
+  defp usage_for_path(path) when is_binary(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} ->
+        usage_for_directory(path)
+
+      {:ok, %File.Stat{type: :regular, size: size}} when is_integer(size) and size > 0 ->
+        {:ok, size}
+
+      {:ok, %File.Stat{}} ->
+        {:ok, 0}
+
+      {:error, :enoent} ->
+        {:ok, 0}
+
+      {:error, reason} ->
+        {:error, {:workspace_usage_scan_failed, path, reason}}
+    end
+  end
+
+  defp usage_for_directory(path) do
+    case File.ls(path) do
+      {:ok, entries} ->
+        Enum.reduce_while(entries, {:ok, 0}, fn entry, {:ok, acc} ->
+          case usage_for_path(Path.join(path, entry)) do
+            {:ok, size} -> {:cont, {:ok, acc + size}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+
+      {:error, :enoent} ->
+        {:ok, 0}
+
+      {:error, reason} ->
+        {:error, {:workspace_usage_scan_failed, path, reason}}
+    end
   end
 
   defp clean_tmp_artifacts(workspace) do

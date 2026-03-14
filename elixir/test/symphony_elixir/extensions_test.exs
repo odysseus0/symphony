@@ -401,6 +401,11 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "p50" => 120,
                  "p95" => 300
                }
+             },
+             "workspace" => %{
+               "usage_bytes" => 2_147_483_648,
+               "warning_threshold_bytes" => 10_737_418_240,
+               "done_closed_keep_count" => 5
              }
            }
 
@@ -602,6 +607,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "MT-RETRY"
     assert html =~ "rendered"
     assert html =~ "Runtime"
+    assert html =~ "Workspace disk"
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
@@ -793,6 +799,11 @@ defmodule SymphonyElixir.ExtensionsTest do
           }
         ],
         linear_api_response_time_ms: %{sample_count: 2, p50: 120, p95: 300}
+      },
+      workspace: %{
+        usage_bytes: 2_147_483_648,
+        warning_threshold_bytes: 10_737_418_240,
+        done_closed_keep_count: 5
       }
     }
   end
