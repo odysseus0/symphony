@@ -10,7 +10,9 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
-  @continuation_retry_delay_ms 1_000
+  @continuation_base_delay_ms 5_000
+  @continuation_max_delay_ms 300_000
+  @max_continuation_retries 5
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
@@ -132,11 +134,17 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           case reason do
             :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+              continuation_attempt =
+                case running_entry[:retry_attempt] do
+                  a when is_integer(a) and a > 0 -> a + 1
+                  _ -> 1
+                end
+
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling continuation check (attempt #{continuation_attempt})")
 
               state
               |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
+              |> schedule_issue_retry(issue_id, continuation_attempt, %{
                 identifier: running_entry.identifier,
                 delay_type: :continuation
               })
@@ -757,7 +765,8 @@ defmodule SymphonyElixir.Orchestrator do
             retry_token: retry_token,
             due_at_ms: due_at_ms,
             identifier: identifier,
-            error: error
+            error: error,
+            delay_type: metadata[:delay_type]
           })
     }
   end
@@ -767,7 +776,8 @@ defmodule SymphonyElixir.Orchestrator do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
-          error: Map.get(retry_entry, :error)
+          error: Map.get(retry_entry, :error),
+          delay_type: Map.get(retry_entry, :delay_type)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -849,6 +859,15 @@ defmodule SymphonyElixir.Orchestrator do
     StatusDashboard.notify_update()
   end
 
+  defp handle_active_retry(state, issue, attempt, %{delay_type: :continuation} = _metadata)
+       when is_integer(attempt) and attempt > @max_continuation_retries do
+    Logger.warning(
+      "Max continuation retries (#{@max_continuation_retries}) reached for #{issue_context(issue)}; releasing claim"
+    )
+
+    {:noreply, release_issue_claim(state, issue.id)}
+  end
+
   defp handle_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) do
@@ -873,12 +892,13 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
+  defp retry_delay(attempt, %{delay_type: :continuation})
+       when is_integer(attempt) and attempt > 0 do
+    min(@continuation_base_delay_ms * (1 <<< min(attempt - 1, 6)), @continuation_max_delay_ms)
+  end
+
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
-    end
+    failure_retry_delay(attempt)
   end
 
   defp failure_retry_delay(attempt) do
