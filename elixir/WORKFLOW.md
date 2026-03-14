@@ -145,17 +145,6 @@ Record the risk classification and rationale in the workpad `### Risk Assessment
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
 
-## Research phase (before execution)
-
-Unless the issue has label `skip-research`, perform a lightweight research pass before planning:
-
-1. Scan related code modules and identify existing patterns relevant to the change.
-2. Check dependency versions and API surfaces that will be used.
-3. Search git history for similar changes (`git log --all --oneline --grep="<keyword>"`).
-4. Identify potential risk points and record them.
-5. Record findings in the workpad `### Research` section.
-6. Budget: spend no more than ~15% of your context on research. If the issue is straightforward (typo, config, docs), keep research minimal (2-3 lines).
-
 ## Context budget discipline
 
 Be aware of your context window consumption throughout execution:
@@ -195,6 +184,17 @@ When a task fails (test failure, build error, runtime error):
    - find/create `## Codex Workpad` bootstrap comment
    - only then begin analysis/planning/implementation work.
 6. Add a short comment if state and issue content are inconsistent, then proceed with the safest flow.
+
+## Step 0.5: Research (before execution)
+
+Unless the issue has label `skip-research`, perform a lightweight research pass before planning:
+
+1. Scan related code modules and identify existing patterns relevant to the change.
+2. Check dependency versions and API surfaces that will be used.
+3. Search git history for similar changes (`git log --all --oneline --grep="<keyword>"`).
+4. Identify potential risk points and record them.
+5. Record findings in the workpad `### Research` section.
+6. Budget: spend no more than ~15% of your context on research. If the issue is straightforward (typo, config, docs), keep research minimal (2-3 lines).
 
 ## Step 1: Start/continue execution (Todo or In Progress)
 
