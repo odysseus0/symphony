@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  project_slug: "a4da3f34d01d"
   active_states:
     - Todo
     - In Progress
@@ -19,7 +19,7 @@ workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    git clone --depth 1 git@github.com:Bububuger/symphony.git .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
@@ -83,6 +83,7 @@ The agent talks to Linear via the `linear_graphql` tool injected by Symphony's a
 - Start by determining the ticket's current status, then follow the matching flow for that status.
 - Start every task by opening the tracking workpad comment and bringing it up to date before doing new implementation work.
 - Spend extra effort up front on planning and verification design before implementation.
+- Atomic commits: each logical task = one git commit. Format: `<type>(<issue-id>): <description>`. Never bundle multiple tasks into a single commit. This enables `git bisect` to pinpoint exact failures.
 - Reproduce first: always confirm the current behavior/issue signal before changing code so the fix target is explicit.
 - Keep ticket metadata current (state, checklist, acceptance criteria, links).
 - Treat a single persistent Linear comment as the source of truth for progress.
@@ -106,6 +107,33 @@ The agent talks to Linear via the `linear_graphql` tool injected by Symphony's a
 - `pull`: keep branch updated with latest `origin/main` before handoff.
 - `land`: when ticket reaches `Merging`, use the `land` skill, which includes the merge loop.
 
+## Risk classification
+
+Before deciding the review path, classify the change by risk level. This determines whether the agent self-reviews or escalates to a human.
+
+**Low risk** (auto-merge):
+- Documentation fixes (README, CHANGELOG, comments, markdown files)
+- Typo / spelling / formatting corrections
+- Version bumps, dependency pin updates (patch only)
+- Removing dead code, unused imports, or deprecated references
+- Config file updates that do not alter runtime behavior
+
+**Medium risk** (auto-merge with extended self-review):
+- Single-file bug fixes with targeted test coverage
+- Adding or updating tests without changing production code
+- Refactoring that does not change public API surface
+- Non-security linting / style fixes
+
+**High risk** (escalate to Human Review):
+- Architectural changes spanning 3+ modules
+- Security-related changes (auth, crypto, secret handling, input validation)
+- Changes to CI/CD pipelines or release workflows
+- Public API surface changes (new commands, changed flags, breaking changes)
+- Database schema or data migration changes
+- Changes the agent is uncertain about or that conflict with existing patterns
+
+Record the risk classification and rationale in the workpad `### Risk Assessment` section before choosing a path.
+
 ## Status map
 
 - `Backlog` -> out of scope for this workflow; do not modify.
@@ -116,6 +144,35 @@ The agent talks to Linear via the `linear_graphql` tool injected by Symphony's a
 - `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
+
+## Research phase (before execution)
+
+Unless the issue has label `skip-research`, perform a lightweight research pass before planning:
+
+1. Scan related code modules and identify existing patterns relevant to the change.
+2. Check dependency versions and API surfaces that will be used.
+3. Search git history for similar changes (`git log --all --oneline --grep="<keyword>"`).
+4. Identify potential risk points and record them.
+5. Record findings in the workpad `### Research` section.
+6. Budget: spend no more than ~15% of your context on research. If the issue is straightforward (typo, config, docs), keep research minimal (2-3 lines).
+
+## Context budget discipline
+
+Be aware of your context window consumption throughout execution:
+
+- **Target**: complete the issue using ≤60% of total context.
+- **WARNING zone (≤35% remaining)**: stop exploring, focus on completing current task, commit progress.
+- **CRITICAL zone (≤25% remaining)**: immediately finish current task → commit → update workpad with handoff notes → stop. Do not start new tasks.
+- Prefer targeted reads (`specific file + line range`) over broad exploration.
+- If you have read 5+ files consecutively without making edits, stop and either start implementing or report a blocker.
+
+## Fix attempt limits
+
+When a task fails (test failure, build error, runtime error):
+
+- **Maximum 3 auto-fix attempts per task.** After 3 failed attempts, record the failure in the workpad `### Blockers` section with: what failed, what was tried, and what you suspect the root cause is.
+- Do not loop indefinitely trying different approaches.
+- After 3 failures, either move to the next task (if independent) or escalate to `Human Review` with the blocker brief.
 
 ## Step 0: Determine current ticket state and route
 
@@ -236,21 +293,47 @@ Use this only when completion is blocked by missing required tools or missing au
     - Confirm every required ticket-provided validation/test-plan item is explicitly marked complete in the workpad.
     - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-open and refresh the workpad before state transition so `Plan`, `Acceptance Criteria`, and `Validation` exactly match completed work.
-12. Only then move issue to `Human Review`.
+12. Apply risk classification (see `Risk classification` section above) and record it in the workpad `### Risk Assessment`.
+13. Route based on risk level:
+    - **Low / Medium risk** → run Step 3a (auto-review and auto-merge).
+    - **High risk** → move issue to `Human Review` and proceed to Step 3b.
     - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Human Review` with the blocker brief and explicit unblock actions.
-13. For `Todo` tickets that already had a PR attached at kickoff:
+14. For `Todo` tickets that already had a PR attached at kickoff:
     - Ensure all existing PR feedback was reviewed and resolved, including inline review comments (code changes or explicit, justified pushback response).
     - Ensure branch was pushed with any required updates.
-    - Then move to `Human Review`.
+    - Then route based on risk level as in step 13.
 
-## Step 3: Human Review and merge handling
+## Step 3a: Auto-review and auto-merge (low / medium risk)
 
-1. When the issue is in `Human Review`, do not code or change ticket content.
-2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
-3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
-4. If approved, human moves the issue to `Merging`.
-5. When the issue is in `Merging`, use the `land` skill and run it in a loop until the PR is merged. Do not call `gh pr merge` directly.
-6. After merge is complete, move the issue to `Done`.
+This flow applies when the change is classified as low or medium risk. The agent acts as both implementer and reviewer.
+
+1. Run a thorough self-review of the PR diff:
+   - `gh pr diff` — read the full diff critically as if reviewing someone else's code.
+   - Check for: correctness, edge cases, test coverage, style consistency, accidental debug code, secret leaks.
+   - For medium risk: additionally verify that no public API surface changed unintentionally and that the change is backwards-compatible.
+2. Record the self-review findings in the workpad under `### Self-Review`.
+3. If the self-review discovers issues:
+   - Fix them, commit, push, re-run validation.
+   - Update the workpad and repeat the self-review until clean.
+4. Once the self-review is clean and all checks pass:
+   - Approve the PR: `gh pr review --approve -b "[auto-review] Low/medium risk. Self-review passed. All checks green."`.
+   - Add the `auto-reviewed` label to the PR: `gh pr edit --add-label auto-reviewed`.
+   - Move the issue to `Merging`.
+5. Proceed to Step 3c (merge handling).
+
+## Step 3b: Human Review (high risk)
+
+1. Move the issue to `Human Review`.
+2. When the issue is in `Human Review`, do not code or change ticket content.
+3. Poll for updates as needed, including GitHub PR review comments from humans and bots.
+4. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
+5. If approved, human moves the issue to `Merging`.
+6. Proceed to Step 3c (merge handling).
+
+## Step 3c: Merge handling
+
+1. When the issue is in `Merging`, use the `land` skill and run it in a loop until the PR is merged. Do not call `gh pr merge` directly.
+2. After merge is complete, move the issue to `Done`.
 
 ## Step 4: Rework handling
 
@@ -264,14 +347,27 @@ Use this only when completion is blocked by missing required tools or missing au
    - Create a new bootstrap `## Codex Workpad` comment.
    - Build a fresh plan/checklist and execute end-to-end.
 
+## Goal-backward verification
+
+Before marking work complete, verify from the user's perspective — not just task completion:
+
+1. **Observable truths**: List 3-7 user-observable behaviors that should be true after this change. Verify each.
+2. **Artifact existence**: For every new file/module created, verify it exists and is non-trivial (not a stub/placeholder).
+3. **Artifact wiring**: For every new artifact, verify it is imported/used somewhere — not orphaned code.
+4. **Anti-pattern scan**: Check for leftover `TODO`, `FIXME`, `console.log`, empty implementations, placeholder returns.
+
+Record results in the workpad `### Goal-Backward Verification` section.
+
 ## Completion bar before Human Review
 
 - Step 1/2 checklist is fully complete and accurately reflected in the single workpad comment.
 - Acceptance criteria and required ticket-provided validation items are complete.
 - Validation/tests are green for the latest commit.
+- Goal-backward verification is complete with no unresolved gaps.
 - PR feedback sweep is complete and no actionable comments remain.
 - PR checks are green, branch is pushed, and PR is linked on the issue.
 - Required PR metadata is present (`symphony` label).
+- Risk classification is recorded in the workpad `### Risk Assessment` section.
 - If app-touching, runtime validation is complete and media evidence is uploaded to the Linear workpad.
 
 ## Guardrails
@@ -291,6 +387,9 @@ Use this only when completion is blocked by missing required tools or missing au
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
 - In `Human Review`, do not make changes; wait and poll.
 - If state is terminal (`Done`), do nothing and shut down.
+- Auto-review (Step 3a) is only permitted for low/medium risk changes. When in doubt, classify as high risk.
+- Maximum 3 auto-fix attempts per failing task. After 3 failures, record blocker and move on or escalate.
+- Do not read 5+ files consecutively without making edits. If stuck in analysis, start implementing or report a blocker.
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action.
 
@@ -304,6 +403,13 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 ```text
 <hostname>:<abs-path>@<short-sha>
 ```
+
+### Research
+
+- <related code modules and patterns>
+- <dependency/API notes>
+- <git history references>
+- <risk points>
 
 ### Plan
 
@@ -321,9 +427,30 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 
 - [ ] targeted tests: `<command>`
 
+### Risk Assessment
+
+- Level: low | medium | high
+- Rationale: <one-line reason>
+- Review path: auto-review | human-review
+
+### Self-Review
+
+- <findings from PR diff self-review, only for auto-review path>
+
+### Goal-Backward Verification
+
+- [ ] Observable truth 1: <user-visible behavior>
+- [ ] Artifact existence: <new files are non-stub>
+- [ ] Artifact wiring: <new files are imported/used>
+- [ ] Anti-pattern scan: no TODO/FIXME/placeholder remains
+
 ### Notes
 
 - <short progress note with timestamp>
+
+### Blockers
+
+- <only include when auto-fix attempts exhausted — what failed, what was tried, suspected root cause>
 
 ### Confusions
 
