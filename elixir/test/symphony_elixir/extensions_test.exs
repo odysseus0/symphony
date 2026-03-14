@@ -342,7 +342,18 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
+             "counts" => %{
+               "running" => 1,
+               "retrying" => 1,
+               "checkpoint_human_verify" => 3,
+               "checkpoint_decision" => 1,
+               "checkpoint_human_action" => 2
+             },
+             "checkpoint_waiting" => %{
+               "human_verify" => 3,
+               "decision" => 1,
+               "human_action" => 2
+             },
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -537,6 +548,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Runtime"
     assert html =~ "Live"
     assert html =~ "Offline"
+    assert html =~ "Checkpoint · Human verify"
+    assert html =~ "Checkpoint · Decision"
+    assert html =~ "Checkpoint · Human action"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
     refute html =~ "data-runtime-clock="
@@ -632,7 +646,14 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+
+    assert response.body["counts"] == %{
+             "running" => 1,
+             "retrying" => 1,
+             "checkpoint_human_verify" => 3,
+             "checkpoint_decision" => 1,
+             "checkpoint_human_action" => 2
+           }
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -702,6 +723,11 @@ defmodule SymphonyElixir.ExtensionsTest do
           error: "boom"
         }
       ],
+      checkpoint_waiting: %{
+        human_verify: 3,
+        decision: 1,
+        human_action: 2
+      },
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }

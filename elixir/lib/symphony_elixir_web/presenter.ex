@@ -11,12 +11,18 @@ defmodule SymphonyElixirWeb.Presenter do
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
+        checkpoint_waiting = checkpoint_waiting_counts(snapshot)
+
         %{
           generated_at: generated_at,
           counts: %{
             running: length(snapshot.running),
-            retrying: length(snapshot.retrying)
+            retrying: length(snapshot.retrying),
+            checkpoint_human_verify: checkpoint_waiting.human_verify,
+            checkpoint_decision: checkpoint_waiting.decision,
+            checkpoint_human_action: checkpoint_waiting.human_action
           },
+          checkpoint_waiting: checkpoint_waiting,
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           codex_totals: snapshot.codex_totals,
@@ -28,6 +34,26 @@ defmodule SymphonyElixirWeb.Presenter do
 
       :unavailable ->
         %{generated_at: generated_at, error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
+    end
+  end
+
+  defp checkpoint_waiting_counts(snapshot) when is_map(snapshot) do
+    source = Map.get(snapshot, :checkpoint_waiting, %{})
+
+    %{
+      human_verify: count_value(source, :human_verify),
+      decision: count_value(source, :decision),
+      human_action: count_value(source, :human_action)
+    }
+  end
+
+  defp count_value(map, key) when is_map(map) and is_atom(key) do
+    value = Map.get(map, key) || Map.get(map, Atom.to_string(key)) || 0
+
+    if is_integer(value) and value >= 0 do
+      value
+    else
+      0
     end
   end
 

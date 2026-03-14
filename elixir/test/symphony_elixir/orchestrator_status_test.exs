@@ -895,6 +895,51 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert next_poll_in_ms <= 50
   end
 
+  test "orchestrator snapshot includes checkpoint waiting counts grouped by type" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_active_states: ["Todo"],
+      poll_interval_ms: 50
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{id: "checkpoint-verify", identifier: "MT-VERIFY", state: "Human Review", labels: []},
+      %Issue{
+        id: "checkpoint-decision",
+        identifier: "MT-DECISION",
+        state: "Human Review",
+        labels: ["decision-needed"]
+      },
+      %Issue{
+        id: "checkpoint-action",
+        identifier: "MT-ACTION",
+        state: "Human Review",
+        labels: ["human-action"]
+      },
+      %Issue{id: "checkpoint-ignored", identifier: "MT-IGNORE", state: "In Progress", labels: ["human-action"]}
+    ])
+
+    orchestrator_name = Module.concat(__MODULE__, :CheckpointCountsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    snapshot =
+      wait_for_snapshot(pid, fn
+        %{checkpoint_waiting: %{human_verify: 1, decision: 1, human_action: 1}} -> true
+        _ -> false
+      end)
+
+    assert snapshot.checkpoint_waiting == %{human_verify: 1, decision: 1, human_action: 1}
+  end
+
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1050,6 +1095,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     checking_rendered = StatusDashboard.format_snapshot_content_for_test(checking_snapshot, 0.0)
     assert checking_rendered =~ "checking now…"
+  end
+
+  test "status dashboard renders checkpoint waiting counts grouped by checkpoint type" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         checkpoint_waiting: %{human_verify: 2, decision: 1, human_action: 3}
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+    plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
+
+    assert plain =~ "Checkpoints: verify 2 | decision 1 | human-action 3"
   end
 
   test "status dashboard adds a spacer line before backoff queue when no agents are active" do

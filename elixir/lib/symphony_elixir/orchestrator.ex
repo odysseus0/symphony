@@ -22,6 +22,11 @@ defmodule SymphonyElixir.Orchestrator do
     total_tokens: 0,
     seconds_running: 0
   }
+  @empty_checkpoint_waiting %{
+    human_verify: 0,
+    decision: 0,
+    human_action: 0
+  }
 
   defmodule State do
     @moduledoc """
@@ -40,7 +45,8 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      checkpoint_waiting: %{}
     ]
   end
 
@@ -63,7 +69,8 @@ defmodule SymphonyElixir.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       codex_totals: @empty_codex_totals,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      checkpoint_waiting: @empty_checkpoint_waiting
     }
 
     run_terminal_workspace_cleanup()
@@ -210,6 +217,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
+    state = refresh_checkpoint_waiting_counts(state)
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
@@ -258,6 +266,54 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
+
+  defp refresh_checkpoint_waiting_counts(%State{} = state) do
+    case Tracker.fetch_issues_by_states(["Human Review"]) do
+      {:ok, issues} when is_list(issues) ->
+        %{state | checkpoint_waiting: classify_checkpoint_waiting(issues)}
+
+      {:error, reason} ->
+        Logger.debug("Failed to refresh checkpoint waiting counts: #{inspect(reason)}; keeping previous values")
+
+        state
+    end
+  end
+
+  defp classify_checkpoint_waiting(issues) when is_list(issues) do
+    Enum.reduce(issues, @empty_checkpoint_waiting, fn issue, acc ->
+      bucket =
+        issue
+        |> issue_labels()
+        |> classify_checkpoint_bucket()
+
+      Map.update!(acc, bucket, &(&1 + 1))
+    end)
+  end
+
+  defp issue_labels(%Issue{} = issue), do: Issue.label_names(issue)
+  defp issue_labels(%{labels: labels}) when is_list(labels), do: labels
+  defp issue_labels(_issue), do: []
+
+  defp classify_checkpoint_bucket(labels) when is_list(labels) do
+    cond do
+      has_label?(labels, "human-action") -> :human_action
+      has_label?(labels, "decision-needed") -> :decision
+      true -> :human_verify
+    end
+  end
+
+  defp has_label?(labels, expected) when is_list(labels) and is_binary(expected) do
+    normalized_expected = normalize_label(expected)
+    Enum.any?(labels, &(normalize_label(&1) == normalized_expected))
+  end
+
+  defp normalize_label(label) when is_binary(label) do
+    label
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_label(label), do: label |> to_string() |> normalize_label()
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
@@ -861,9 +917,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_active_retry(state, issue, attempt, %{delay_type: :continuation} = _metadata)
        when is_integer(attempt) and attempt > @max_continuation_retries do
-    Logger.warning(
-      "Max continuation retries (#{@max_continuation_retries}) reached for #{issue_context(issue)}; releasing claim"
-    )
+    Logger.warning("Max continuation retries (#{@max_continuation_retries}) reached for #{issue_context(issue)}; releasing claim")
 
     {:noreply, release_issue_claim(state, issue.id)}
   end
@@ -1032,6 +1086,7 @@ defmodule SymphonyElixir.Orchestrator do
      %{
        running: running,
        retrying: retrying,
+       checkpoint_waiting: Map.get(state, :checkpoint_waiting, @empty_checkpoint_waiting),
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
