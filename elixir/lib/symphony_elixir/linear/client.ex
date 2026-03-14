@@ -166,21 +166,31 @@ defmodule SymphonyElixir.Linear.Client do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
 
-    with {:ok, headers} <- graphql_headers(),
-         {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
-      {:ok, body}
+    with {:ok, headers} <- graphql_headers() do
+      started_ms = System.monotonic_time(:millisecond)
+      response = request_fun.(payload, headers)
+      response_time_ms = max(0, System.monotonic_time(:millisecond) - started_ms)
+      emit_graphql_response_time_ms(response_time_ms)
+
+      case response do
+        {:ok, %{status: 200, body: body}} ->
+          {:ok, body}
+
+        {:ok, response} ->
+          Logger.error(
+            "Linear GraphQL request failed status=#{response.status}" <>
+              linear_error_context(payload, response)
+          )
+
+          {:error, {:linear_api_status, response.status}}
+
+        {:error, reason} ->
+          Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+          {:error, {:linear_api_request, reason}}
+      end
     else
-      {:ok, response} ->
-        Logger.error(
-          "Linear GraphQL request failed status=#{response.status}" <>
-            linear_error_context(payload, response)
-        )
-
-        {:error, {:linear_api_status, response.status}}
-
       {:error, reason} ->
-        Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
-        {:error, {:linear_api_request, reason}}
+        {:error, reason}
     end
   end
 
@@ -401,6 +411,20 @@ defmodule SymphonyElixir.Linear.Client do
       connect_options: [timeout: 30_000]
     )
   end
+
+  defp emit_graphql_response_time_ms(response_time_ms)
+       when is_integer(response_time_ms) and response_time_ms >= 0 do
+    case Process.whereis(SymphonyElixir.Orchestrator) do
+      pid when is_pid(pid) ->
+        send(pid, {:linear_graphql_response_time_ms, response_time_ms})
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp emit_graphql_response_time_ms(_response_time_ms), do: :ok
 
   defp decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
     issues =

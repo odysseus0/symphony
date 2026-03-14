@@ -15,6 +15,8 @@ defmodule SymphonyElixir.Orchestrator do
   @max_continuation_retries 5
   @failure_retry_base_ms 10_000
   @human_review_state "Human Review"
+  @stats_max_samples 5_000
+  @stats_max_turn_samples 500
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -41,7 +43,14 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      stats_completed_count: 0,
+      stats_failed_count: 0,
+      stats_completed_duration_ms: [],
+      stats_turn_tokens: [],
+      stats_linear_response_time_ms: [],
+      stats_issue_started_at_ms: %{},
+      stats_finalized_issue_ids: MapSet.new()
     ]
   end
 
@@ -64,7 +73,14 @@ defmodule SymphonyElixir.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       codex_totals: @empty_codex_totals,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      stats_completed_count: 0,
+      stats_failed_count: 0,
+      stats_completed_duration_ms: [],
+      stats_turn_tokens: [],
+      stats_linear_response_time_ms: [],
+      stats_issue_started_at_ms: %{},
+      stats_finalized_issue_ids: MapSet.new()
     }
 
     run_terminal_workspace_cleanup()
@@ -196,6 +212,7 @@ defmodule SymphonyElixir.Orchestrator do
           state
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
+          |> record_turn_token_usage(issue_id, updated_running_entry, update)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -203,6 +220,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
+
+  def handle_info({:linear_graphql_response_time_ms, response_time_ms}, state)
+      when is_integer(response_time_ms) and response_time_ms >= 0 do
+    {:noreply, record_linear_response_time_ms(state, response_time_ms)}
+  end
+
+  def handle_info({:linear_graphql_response_time_ms, _response_time_ms}, state),
+    do: {:noreply, state}
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
@@ -344,7 +369,9 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        state
+        |> record_issue_outcome(issue.id, issue.state)
+        |> terminate_running_issue(issue.id, true)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
@@ -357,7 +384,9 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        state
+        |> record_issue_outcome(issue.id, issue.state)
+        |> terminate_running_issue(issue.id, false)
     end
   end
 
@@ -682,6 +711,7 @@ defmodule SymphonyElixir.Orchestrator do
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
+        now_ms = System.monotonic_time(:millisecond)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} runtime=#{runtime.name}")
 
@@ -707,6 +737,8 @@ defmodule SymphonyElixir.Orchestrator do
             started_at: DateTime.utc_now(),
             runtime_name: runtime.name
           })
+
+        state = mark_issue_dispatch_started(state, issue.id, now_ms)
 
         %{
           state
@@ -850,7 +882,10 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply,
+         state
+         |> record_issue_outcome(issue_id, issue.state)
+         |> release_issue_claim(issue_id)}
     end
   end
 
@@ -890,7 +925,10 @@ defmodule SymphonyElixir.Orchestrator do
        when is_integer(attempt) and attempt > @max_continuation_retries do
     Logger.warning("Max continuation retries (#{@max_continuation_retries}) reached for #{issue_context(issue)}; releasing claim")
 
-    {:noreply, release_issue_claim(state, issue.id)}
+    {:noreply,
+     state
+     |> record_issue_outcome(issue.id, :continuation_retries_exhausted)
+     |> release_issue_claim(issue.id)}
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
@@ -1161,6 +1199,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        codex_totals: state.codex_totals,
+       stats: snapshot_stats(state),
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
          checking?: state.poll_check_in_progress == true,
@@ -1365,6 +1404,222 @@ defmodule SymphonyElixir.Orchestrator do
       seconds_running: max(0, seconds_running)
     }
   end
+
+  defp mark_issue_dispatch_started(%State{} = state, issue_id, now_ms)
+       when is_binary(issue_id) and is_integer(now_ms) do
+    started = Map.get(state, :stats_issue_started_at_ms, %{})
+
+    if Map.has_key?(started, issue_id) do
+      state
+    else
+      %{state | stats_issue_started_at_ms: Map.put(started, issue_id, now_ms)}
+    end
+  end
+
+  defp mark_issue_dispatch_started(state, _issue_id, _now_ms), do: state
+
+  defp record_issue_outcome(%State{} = state, issue_id, issue_state) when is_binary(issue_id) do
+    finalized = Map.get(state, :stats_finalized_issue_ids, MapSet.new())
+
+    if MapSet.member?(finalized, issue_id) do
+      state
+    else
+      case classify_issue_outcome(issue_state) do
+        :completed ->
+          record_completed_outcome(state, issue_id)
+
+        :failed ->
+          record_failed_outcome(state, issue_id)
+
+        :ignored ->
+          clear_issue_dispatch_started(state, issue_id)
+      end
+    end
+  end
+
+  defp record_issue_outcome(state, _issue_id, _issue_state), do: state
+
+  defp classify_issue_outcome(:continuation_retries_exhausted), do: :failed
+
+  defp classify_issue_outcome(issue_state) when is_binary(issue_state) do
+    normalized = issue_state |> String.trim() |> String.downcase()
+
+    cond do
+      normalized == "" ->
+        :ignored
+
+      String.contains?(normalized, ["done", "complete", "completed", "resolved", "closed"]) ->
+        :completed
+
+      String.contains?(normalized, ["human review", "blocker", "blocked", "fail", "failed", "error", "rework"]) ->
+        :failed
+
+      true ->
+        :ignored
+    end
+  end
+
+  defp classify_issue_outcome(_issue_state), do: :ignored
+
+  defp record_completed_outcome(%State{} = state, issue_id) do
+    now_ms = System.monotonic_time(:millisecond)
+    started = Map.get(state, :stats_issue_started_at_ms, %{})
+
+    duration_ms =
+      case Map.get(started, issue_id) do
+        started_at when is_integer(started_at) -> max(0, now_ms - started_at)
+        _ -> nil
+      end
+
+    durations = Map.get(state, :stats_completed_duration_ms, [])
+    durations = if is_integer(duration_ms), do: prepend_limited(durations, duration_ms, @stats_max_samples), else: durations
+
+    state
+    |> Map.put(:stats_completed_count, Map.get(state, :stats_completed_count, 0) + 1)
+    |> Map.put(:stats_completed_duration_ms, durations)
+    |> finalize_issue_stats(issue_id)
+  end
+
+  defp record_failed_outcome(%State{} = state, issue_id) do
+    state
+    |> Map.put(:stats_failed_count, Map.get(state, :stats_failed_count, 0) + 1)
+    |> finalize_issue_stats(issue_id)
+  end
+
+  defp finalize_issue_stats(%State{} = state, issue_id) when is_binary(issue_id) do
+    finalized = Map.get(state, :stats_finalized_issue_ids, MapSet.new())
+
+    state
+    |> Map.put(:stats_finalized_issue_ids, MapSet.put(finalized, issue_id))
+    |> clear_issue_dispatch_started(issue_id)
+  end
+
+  defp finalize_issue_stats(state, _issue_id), do: state
+
+  defp clear_issue_dispatch_started(%State{} = state, issue_id) when is_binary(issue_id) do
+    started = Map.get(state, :stats_issue_started_at_ms, %{})
+    %{state | stats_issue_started_at_ms: Map.delete(started, issue_id)}
+  end
+
+  defp clear_issue_dispatch_started(state, _issue_id), do: state
+
+  defp record_linear_response_time_ms(%State{} = state, response_time_ms)
+       when is_integer(response_time_ms) and response_time_ms >= 0 do
+    samples = Map.get(state, :stats_linear_response_time_ms, [])
+    %{state | stats_linear_response_time_ms: prepend_limited(samples, response_time_ms, @stats_max_samples)}
+  end
+
+  defp record_linear_response_time_ms(state, _response_time_ms), do: state
+
+  defp record_turn_token_usage(%State{} = state, issue_id, running_entry, update)
+       when is_binary(issue_id) and is_map(running_entry) and is_map(update) do
+    case extract_turn_usage(update) do
+      nil ->
+        state
+
+      %{input_tokens: input_tokens, output_tokens: output_tokens, total_tokens: total_tokens} ->
+        turn_entry = %{
+          issue_id: issue_id,
+          issue_identifier: Map.get(running_entry, :identifier),
+          session_id: Map.get(running_entry, :session_id),
+          turn_count: Map.get(running_entry, :turn_count, 0),
+          input_tokens: input_tokens,
+          output_tokens: output_tokens,
+          total_tokens: total_tokens,
+          recorded_at: Map.get(update, :timestamp)
+        }
+
+        turn_entries = Map.get(state, :stats_turn_tokens, [])
+        %{state | stats_turn_tokens: prepend_limited(turn_entries, turn_entry, @stats_max_turn_samples)}
+    end
+  end
+
+  defp record_turn_token_usage(state, _issue_id, _running_entry, _update), do: state
+
+  defp extract_turn_usage(%{event: :turn_completed} = update) do
+    payload = Map.get(update, :payload) || Map.get(update, "payload") || %{}
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+
+    if method in ["turn/completed", :turn_completed] do
+      usage =
+        map_at_path(payload, ["usage"]) ||
+          map_at_path(payload, [:usage]) ||
+          map_at_path(payload, ["params", "usage"]) ||
+          map_at_path(payload, [:params, :usage]) ||
+          map_at_path(payload, ["params", "turn", "usage"]) ||
+          map_at_path(payload, [:params, :turn, :usage])
+
+      if is_map(usage) and integer_token_map?(usage) do
+        input_tokens = get_token_usage(usage, :input) || 0
+        output_tokens = get_token_usage(usage, :output) || 0
+        total_tokens = get_token_usage(usage, :total) || max(0, input_tokens + output_tokens)
+
+        %{
+          input_tokens: input_tokens,
+          output_tokens: output_tokens,
+          total_tokens: total_tokens
+        }
+      end
+    end
+  end
+
+  defp extract_turn_usage(_update), do: nil
+
+  defp snapshot_stats(%State{} = state) do
+    completed_count = Map.get(state, :stats_completed_count, 0)
+    failed_count = Map.get(state, :stats_failed_count, 0)
+    durations = Map.get(state, :stats_completed_duration_ms, []) |> Enum.reverse()
+    linear_response_times = Map.get(state, :stats_linear_response_time_ms, []) |> Enum.reverse()
+
+    %{
+      completed_count: completed_count,
+      failed_count: failed_count,
+      success_rate: success_rate(completed_count, failed_count),
+      duration_ms: %{
+        sample_count: length(durations),
+        p50: percentile(durations, 50),
+        p95: percentile(durations, 95),
+        p99: percentile(durations, 99)
+      },
+      per_turn_tokens: Map.get(state, :stats_turn_tokens, []),
+      linear_api_response_time_ms: %{
+        sample_count: length(linear_response_times),
+        p50: percentile(linear_response_times, 50),
+        p95: percentile(linear_response_times, 95)
+      }
+    }
+  end
+
+  defp success_rate(completed_count, failed_count)
+       when is_integer(completed_count) and is_integer(failed_count) do
+    total = completed_count + failed_count
+
+    if total > 0 do
+      completed_count / total
+    else
+      nil
+    end
+  end
+
+  defp success_rate(_completed_count, _failed_count), do: nil
+
+  defp percentile([], _percentile), do: nil
+
+  defp percentile(values, percentile)
+       when is_list(values) and is_number(percentile) do
+    sorted = Enum.sort(values)
+    count = length(sorted)
+    rank = max(1, Float.ceil(percentile / 100 * count) |> trunc())
+    Enum.at(sorted, rank - 1)
+  end
+
+  defp percentile(_values, _percentile), do: nil
+
+  defp prepend_limited(list, value, limit) when is_list(list) and is_integer(limit) and limit > 0 do
+    [value | list] |> Enum.take(limit)
+  end
+
+  defp prepend_limited(list, _value, _limit), do: list
 
   defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
     running_entry = running_entry || %{}

@@ -753,6 +753,136 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert due_in_ms > 0
   end
 
+  test "orchestrator snapshot records completion/failure stats and duration percentiles" do
+    orchestrator_name = Module.concat(__MODULE__, :OutcomeStatsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    state_with_stats =
+      initial_state
+      |> Map.put(:stats_completed_count, 1)
+      |> Map.put(:stats_failed_count, 1)
+      |> Map.put(:stats_completed_duration_ms, [7_000, 5_400, 2_200])
+
+    :sys.replace_state(pid, fn _ -> state_with_stats end)
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert snapshot.stats.completed_count == 1
+    assert snapshot.stats.failed_count == 1
+    assert_in_delta snapshot.stats.success_rate, 0.5, 1.0e-6
+    assert snapshot.stats.duration_ms.sample_count == 3
+    assert snapshot.stats.duration_ms.p50 == 5_400
+    assert snapshot.stats.duration_ms.p95 == 7_000
+    assert snapshot.stats.duration_ms.p99 == 7_000
+  end
+
+  test "orchestrator snapshot records per-turn token details and linear api latency percentiles" do
+    issue_id = "issue-turn-and-latency-stats"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-712",
+      title: "Stats detail issue",
+      description: "Record per-turn and latency details",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-712"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :TurnLatencyStatsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    now = DateTime.utc_now()
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :session_started,
+         session_id: "thread-stats-turn-1",
+         timestamp: now
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         payload: %{
+           "method" => "turn/completed",
+           "usage" => %{"input_tokens" => 18, "output_tokens" => 7, "total_tokens" => 25}
+         },
+         timestamp: now
+       }}
+    )
+
+    send(pid, {:linear_graphql_response_time_ms, 120})
+    send(pid, {:linear_graphql_response_time_ms, 300})
+
+    snapshot =
+      wait_for_snapshot(
+        pid,
+        fn snapshot ->
+          turn_entries = get_in(snapshot, [:stats, :per_turn_tokens]) || []
+          latency = get_in(snapshot, [:stats, :linear_api_response_time_ms, :p50])
+
+          Enum.any?(turn_entries, fn entry ->
+            entry.issue_id == issue_id and entry.input_tokens == 18 and entry.output_tokens == 7 and
+              entry.total_tokens == 25
+          end) and is_integer(latency)
+        end,
+        500
+      )
+
+    assert [%{issue_id: ^issue_id, input_tokens: 18, output_tokens: 7, total_tokens: 25} | _] =
+             snapshot.stats.per_turn_tokens
+
+    assert is_integer(snapshot.stats.linear_api_response_time_ms.p50)
+    assert is_integer(snapshot.stats.linear_api_response_time_ms.p95)
+  end
+
   test "orchestrator snapshot includes poll countdown and checking status" do
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -774,7 +904,24 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       }
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot =
+      wait_for_snapshot(
+        pid,
+        fn snapshot ->
+          match?(
+            %{
+              polling: %{
+                checking?: false,
+                poll_interval_ms: 30_000,
+                next_poll_in_ms: due_in_ms
+              }
+            }
+            when is_integer(due_in_ms),
+            snapshot
+          )
+        end,
+        2_000
+      )
 
     assert %{
              polling: %{

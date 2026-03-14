@@ -20,8 +20,26 @@ defmodule SymphonyElixirWeb.Presenter do
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           codex_totals: snapshot.codex_totals,
+          stats: stats_payload_from_snapshot(snapshot),
           rate_limits: snapshot.rate_limits
         }
+
+      :timeout ->
+        %{generated_at: generated_at, error: %{code: "snapshot_timeout", message: "Snapshot timed out"}}
+
+      :unavailable ->
+        %{generated_at: generated_at, error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
+    end
+  end
+
+  @spec stats_payload(GenServer.name(), timeout()) :: map()
+  def stats_payload(orchestrator, snapshot_timeout_ms) do
+    generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+    case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
+      %{} = snapshot ->
+        stats_payload_from_snapshot(snapshot)
+        |> Map.put(:generated_at, generated_at)
 
       :timeout ->
         %{generated_at: generated_at, error: %{code: "snapshot_timeout", message: "Snapshot timed out"}}
@@ -180,4 +198,18 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp iso8601(_datetime), do: nil
+
+  defp stats_payload_from_snapshot(snapshot) when is_map(snapshot) do
+    default = %{
+      completed_count: 0,
+      failed_count: 0,
+      success_rate: nil,
+      duration_ms: %{sample_count: 0, p50: nil, p95: nil, p99: nil},
+      per_turn_tokens: [],
+      linear_api_response_time_ms: %{sample_count: 0, p50: nil, p95: nil}
+    }
+
+    stats = Map.get(snapshot, :stats) || Map.get(snapshot, "stats") || %{}
+    Map.merge(default, stats)
+  end
 end

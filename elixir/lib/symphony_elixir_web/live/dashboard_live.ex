@@ -106,6 +106,47 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
         </section>
 
+        <% stats = stats(@payload) %>
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Stats</h2>
+              <p class="section-copy">Completion outcomes, issue duration distribution, and Linear API latency.</p>
+            </div>
+          </div>
+
+          <div class="metric-grid">
+            <article class="metric-card">
+              <p class="metric-label">Completed</p>
+              <p class="metric-value numeric"><%= format_int(stats.completed_count) %></p>
+            </article>
+
+            <article class="metric-card">
+              <p class="metric-label">Failed</p>
+              <p class="metric-value numeric"><%= format_int(stats.failed_count) %></p>
+            </article>
+
+            <article class="metric-card">
+              <p class="metric-label">Success rate</p>
+              <p class="metric-value numeric"><%= format_success_rate(stats.success_rate) %></p>
+              <p class="metric-detail">
+                Duration P50/P95/P99:
+                <span class="numeric"><%= format_milliseconds(stats.duration_ms.p50) %></span> /
+                <span class="numeric"><%= format_milliseconds(stats.duration_ms.p95) %></span> /
+                <span class="numeric"><%= format_milliseconds(stats.duration_ms.p99) %></span>
+              </p>
+            </article>
+
+            <article class="metric-card">
+              <p class="metric-label">Linear API latency</p>
+              <p class="metric-value numeric"><%= format_milliseconds(stats.linear_api_response_time_ms.p50) %></p>
+              <p class="metric-detail">
+                P95 <span class="numeric"><%= format_milliseconds(stats.linear_api_response_time_ms.p95) %></span>
+              </p>
+            </article>
+          </div>
+        </section>
+
         <section class="section-card">
           <div class="section-header">
             <div>
@@ -310,6 +351,35 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp format_int(_value), do: "n/a"
+
+  defp format_success_rate(rate) when is_number(rate) and rate >= 0 do
+    :erlang.float_to_binary(rate * 100, decimals: 2) <> "%"
+  end
+
+  defp format_success_rate(_rate), do: "n/a"
+
+  defp format_milliseconds(value) when is_integer(value), do: "#{format_int(value)}ms"
+  defp format_milliseconds(_value), do: "n/a"
+
+  defp stats(payload) when is_map(payload) do
+    Map.get(payload, :stats) ||
+      %{
+        completed_count: 0,
+        failed_count: 0,
+        success_rate: nil,
+        duration_ms: %{p50: nil, p95: nil, p99: nil},
+        linear_api_response_time_ms: %{p50: nil, p95: nil}
+      }
+  end
+
+  defp stats(_payload),
+    do: %{
+      completed_count: 0,
+      failed_count: 0,
+      success_rate: nil,
+      duration_ms: %{p50: nil, p95: nil, p99: nil},
+      linear_api_response_time_ms: %{p50: nil, p95: nil}
+    }
 
   defp state_badge_class(state) do
     base = "state-badge"

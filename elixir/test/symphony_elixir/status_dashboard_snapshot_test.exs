@@ -12,7 +12,8 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
          running: [],
          retrying: [],
          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-         rate_limits: nil
+         rate_limits: nil,
+         stats: nil
        }}
 
     Snapshot.assert_dashboard_snapshot!("idle", render_snapshot(snapshot_data, 0.0))
@@ -37,7 +38,8 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
          running: [],
          retrying: [],
          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-         rate_limits: nil
+         rate_limits: nil,
+         stats: nil
        }}
 
     Snapshot.assert_dashboard_snapshot!("idle_with_dashboard_url", render_snapshot(snapshot_data, 0.0))
@@ -74,6 +76,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
            total_tokens: 268_500,
            seconds_running: 4_321
          },
+         stats: nil,
          rate_limits: %{
            limit_id: "gpt-5",
            primary: %{remaining: 12_345, limit: 20_000, reset_in_seconds: 30},
@@ -131,6 +134,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
            })
          ],
          codex_totals: %{input_tokens: 18_000, output_tokens: 2_200, total_tokens: 20_200, seconds_running: 2_700},
+         stats: nil,
          rate_limits: %{
            limit_id: "gpt-5",
            primary: %{remaining: 0, limit: 20_000, reset_in_seconds: 95},
@@ -157,7 +161,8 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
            })
          ],
          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-         rate_limits: nil
+         rate_limits: nil,
+         stats: nil
        }}
 
     rendered = render_snapshot(snapshot_data, 0.0)
@@ -189,6 +194,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
          ],
          retrying: [],
          codex_totals: %{input_tokens: 90, output_tokens: 12, total_tokens: 102, seconds_running: 75},
+         stats: nil,
          rate_limits: %{
            limit_id: "priority-tier",
            primary: %{remaining: 100, limit: 100, reset_in_seconds: 1},
@@ -198,6 +204,33 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
        }}
 
     Snapshot.assert_dashboard_snapshot!("credits_unlimited", render_snapshot(snapshot_data, 42.0))
+  end
+
+  test "snapshot renders stats section with completion and latency metrics" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         stats: %{
+           completed_count: 9,
+           failed_count: 3,
+           success_rate: 0.75,
+           duration_ms: %{sample_count: 9, p50: 1_200, p95: 5_600, p99: 8_900},
+           per_turn_tokens: [],
+           linear_api_response_time_ms: %{sample_count: 12, p50: 120, p95: 450}
+         }
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+    assert rendered =~ "Stats"
+    assert rendered =~ "completed=9"
+    assert rendered =~ "failed=3"
+    assert rendered =~ "success_rate=75.00%"
+    assert rendered =~ "duration_p50=1,200ms"
+    assert rendered =~ "linear_p95=450ms"
   end
 
   defp render_snapshot(snapshot_data, tps) do

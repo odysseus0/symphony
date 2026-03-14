@@ -373,7 +373,67 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "stats" => %{
+               "completed_count" => 3,
+               "failed_count" => 1,
+               "success_rate" => 0.75,
+               "duration_ms" => %{
+                 "sample_count" => 3,
+                 "p50" => 2_200,
+                 "p95" => 5_400,
+                 "p99" => 5_400
+               },
+               "per_turn_tokens" => [
+                 %{
+                   "issue_id" => "issue-http",
+                   "issue_identifier" => "MT-HTTP",
+                   "session_id" => "thread-http",
+                   "turn_count" => 7,
+                   "input_tokens" => 2,
+                   "output_tokens" => 3,
+                   "total_tokens" => 5,
+                   "recorded_at" => state_payload["stats"]["per_turn_tokens"] |> List.first() |> Map.fetch!("recorded_at")
+                 }
+               ],
+               "linear_api_response_time_ms" => %{
+                 "sample_count" => 2,
+                 "p50" => 120,
+                 "p95" => 300
+               }
+             }
+           }
+
+    stats_payload = json_response(get(build_conn(), "/api/v1/stats"), 200)
+
+    assert stats_payload == %{
+             "generated_at" => stats_payload["generated_at"],
+             "completed_count" => 3,
+             "failed_count" => 1,
+             "success_rate" => 0.75,
+             "duration_ms" => %{
+               "sample_count" => 3,
+               "p50" => 2_200,
+               "p95" => 5_400,
+               "p99" => 5_400
+             },
+             "per_turn_tokens" => [
+               %{
+                 "issue_id" => "issue-http",
+                 "issue_identifier" => "MT-HTTP",
+                 "session_id" => "thread-http",
+                 "turn_count" => 7,
+                 "input_tokens" => 2,
+                 "output_tokens" => 3,
+                 "total_tokens" => 5,
+                 "recorded_at" => stats_payload["per_turn_tokens"] |> List.first() |> Map.fetch!("recorded_at")
+               }
+             ],
+             "linear_api_response_time_ms" => %{
+               "sample_count" => 2,
+               "p50" => 120,
+               "p95" => 300
+             }
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
@@ -427,6 +487,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)
 
     assert json_response(post(build_conn(), "/api/v1/state", %{}), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
+
+    assert json_response(post(build_conn(), "/api/v1/stats", %{}), 405) ==
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
     assert json_response(get(build_conn(), "/api/v1/refresh"), 405) ==
@@ -543,6 +606,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
+    assert html =~ "Completed"
+    assert html =~ "Failed"
+    assert html =~ "Success rate"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -708,7 +774,26 @@ defmodule SymphonyElixir.ExtensionsTest do
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
-      rate_limits: %{"primary" => %{"remaining" => 11}}
+      rate_limits: %{"primary" => %{"remaining" => 11}},
+      stats: %{
+        completed_count: 3,
+        failed_count: 1,
+        success_rate: 0.75,
+        duration_ms: %{sample_count: 3, p50: 2_200, p95: 5_400, p99: 5_400},
+        per_turn_tokens: [
+          %{
+            issue_id: "issue-http",
+            issue_identifier: "MT-HTTP",
+            session_id: "thread-http",
+            turn_count: 7,
+            input_tokens: 2,
+            output_tokens: 3,
+            total_tokens: 5,
+            recorded_at: DateTime.utc_now()
+          }
+        ],
+        linear_api_response_time_ms: %{sample_count: 2, p50: 120, p95: 300}
+      }
     }
   end
 

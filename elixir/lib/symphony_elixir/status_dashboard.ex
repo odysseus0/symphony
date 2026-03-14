@@ -317,6 +317,7 @@ defmodule SymphonyElixir.StatusDashboard do
              running: running,
              retrying: retrying,
              codex_totals: codex_totals,
+             stats: Map.get(snapshot, :stats),
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }},
@@ -335,6 +336,8 @@ defmodule SymphonyElixir.StatusDashboard do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
+        stats = Map.get(snapshot, :stats)
+        stats_lines = format_stats_lines(stats)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
@@ -364,6 +367,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+           stats_lines,
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -427,6 +431,45 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_project_refresh_line(_) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("n/a", @ansi_gray)
   end
+
+  defp format_stats_lines(nil), do: []
+
+  defp format_stats_lines(stats) when is_map(stats) do
+    completed = Map.get(stats, :completed_count, 0)
+    failed = Map.get(stats, :failed_count, 0)
+    success_rate = format_success_rate(Map.get(stats, :success_rate))
+    duration = Map.get(stats, :duration_ms, %{})
+    linear = Map.get(stats, :linear_api_response_time_ms, %{})
+
+    [
+      colorize("│ Stats: ", @ansi_bold) <>
+        colorize(
+          "completed=#{format_count(completed)} failed=#{format_count(failed)} success_rate=#{success_rate}",
+          @ansi_cyan
+        ),
+      colorize("│ Stats: ", @ansi_bold) <>
+        colorize(
+          "duration_p50=#{format_ms_stat(Map.get(duration, :p50))} duration_p95=#{format_ms_stat(Map.get(duration, :p95))} duration_p99=#{format_ms_stat(Map.get(duration, :p99))}",
+          @ansi_cyan
+        ),
+      colorize("│ Stats: ", @ansi_bold) <>
+        colorize(
+          "linear_p50=#{format_ms_stat(Map.get(linear, :p50))} linear_p95=#{format_ms_stat(Map.get(linear, :p95))}",
+          @ansi_cyan
+        )
+    ]
+  end
+
+  defp format_stats_lines(_stats), do: []
+
+  defp format_success_rate(rate) when is_number(rate) and rate >= 0 do
+    :erlang.float_to_binary(rate * 100, decimals: 2) <> "%"
+  end
+
+  defp format_success_rate(_rate), do: "n/a"
+
+  defp format_ms_stat(value) when is_integer(value), do: "#{format_count(value)}ms"
+  defp format_ms_stat(_value), do: "n/a"
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
 
@@ -562,6 +605,7 @@ defmodule SymphonyElixir.StatusDashboard do
              running: running,
              retrying: retrying,
              codex_totals: codex_totals,
+             stats: Map.get(snapshot, :stats),
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }}
