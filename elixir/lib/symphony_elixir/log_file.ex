@@ -68,7 +68,7 @@ defmodule SymphonyElixir.LogFile do
   defp disk_log_handler_config(path, max_bytes, max_files) do
     %{
       level: :all,
-      formatter: {:logger_formatter, %{single_line: true}},
+      formatter: {SymphonyElixir.JsonFormatter, %{}},
       config: %{
         file: String.to_charlist(path),
         type: :wrap,

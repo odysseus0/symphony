@@ -7,6 +7,23 @@ This guide defines logging conventions for Symphony so Codex can diagnose failur
 - Make logs searchable by issue and session.
 - Capture enough execution context to identify root cause without reruns.
 - Keep messages stable so dashboards/alerts are reliable.
+- Emit JSON Lines so logs can be parsed and shipped to Loki/ELK directly.
+
+## Output Format
+
+Each log line is a JSON object with baseline fields:
+
+- `timestamp` (ISO8601)
+- `level`
+- `module`
+- `message`
+
+Issue/agent logs also include:
+
+- `issue_id`
+- `issue_identifier`
+- `session_id`
+- `workspace`
 
 ## Required Context Fields
 
