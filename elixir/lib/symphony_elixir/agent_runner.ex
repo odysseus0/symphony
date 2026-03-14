@@ -19,52 +19,68 @@ defmodule SymphonyElixir.AgentRunner do
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
-    Logger.info("Starting agent run for #{issue_context(issue)}")
+    trace_id = issue_trace_id(issue, opts)
+    issue = attach_trace_id(issue, trace_id)
+    opts = maybe_put_trace_id_opt(opts, trace_id)
 
-    case Workspace.create_for_issue(issue) do
-      {:ok, workspace} ->
-        try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue),
-               :ok <- run_codex_turns(workspace, issue, codex_update_recipient, opts) do
-            :ok
-          else
-            {:error, reason} ->
-              raise_run_error(issue, reason)
+    with_issue_logger_metadata(issue, trace_id, fn ->
+      Logger.info("Starting agent run for #{issue_context(issue)}")
+
+      case Workspace.create_for_issue(issue) do
+        {:ok, workspace} ->
+          try do
+            with :ok <- Workspace.run_before_run_hook(workspace, issue, trace_id: trace_id),
+                 :ok <- run_codex_turns(workspace, issue, codex_update_recipient, opts) do
+              :ok
+            else
+              {:error, reason} ->
+                raise_run_error(issue, reason)
+            end
+          after
+            Workspace.run_after_run_hook(workspace, issue, trace_id: trace_id)
           end
-        after
-          Workspace.run_after_run_hook(workspace, issue)
-        end
 
-      {:error, reason} ->
-        raise_run_error(issue, reason)
-    end
+        {:error, reason} ->
+          raise_run_error(issue, reason)
+      end
+    end)
   end
 
   @doc false
   @spec classify_error_for_test(term()) :: error_class()
   def classify_error_for_test(reason), do: ErrorClassifier.classify(reason)
 
-  defp codex_message_handler(recipient, issue) do
+  defp codex_message_handler(recipient, issue, trace_id) do
     fn message ->
-      send_codex_update(recipient, issue, message)
+      send_codex_update(recipient, issue, message, trace_id)
     end
   end
 
-  defp send_codex_update(recipient, %Issue{id: issue_id}, message)
+  defp send_codex_update(recipient, %Issue{id: issue_id}, message, trace_id)
        when is_binary(issue_id) and is_pid(recipient) do
+    message =
+      if is_binary(trace_id) do
+        Map.put_new(message, :trace_id, trace_id)
+      else
+        message
+      end
+
     send(recipient, {:codex_worker_update, issue_id, message})
     :ok
   end
 
-  defp send_codex_update(_recipient, _issue, _message), do: :ok
+  defp send_codex_update(_recipient, _issue, _message, _trace_id), do: :ok
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts) do
     runtime = Keyword.get(opts, :runtime)
     default_max_turns = Config.settings!().agent.max_turns
     max_turns = runtime_max_turns(runtime, default_max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    trace_id = issue_trace_id(issue, opts)
 
-    session_opts = runtime_session_opts(runtime)
+    session_opts =
+      runtime_session_opts(runtime)
+      |> Keyword.merge(issue: issue, trace_id: trace_id)
 
     with {:ok, session} <- AppServer.start_session(workspace, session_opts) do
       try do
@@ -98,7 +114,8 @@ defmodule SymphonyElixir.AgentRunner do
              app_session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
+             on_message: codex_message_handler(codex_update_recipient, issue, issue_trace_id(issue, opts)),
+             trace_id: issue_trace_id(issue, opts)
            ) do
       turn_elapsed_ms = System.monotonic_time(:millisecond) - turn_start_ms
       empty_turn? = turn_elapsed_ms < @empty_turn_threshold_ms
@@ -220,6 +237,45 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp issue_identifier(%Issue{identifier: identifier}) when is_binary(identifier), do: identifier
   defp issue_identifier(_issue), do: nil
+
+  defp issue_trace_id(issue, opts) when is_list(opts) do
+    Keyword.get(opts, :trace_id) || issue_trace_id(issue)
+  end
+
+  defp issue_trace_id(%{trace_id: trace_id}) when is_binary(trace_id) and trace_id != "", do: trace_id
+  defp issue_trace_id(_issue), do: nil
+
+  defp attach_trace_id(%Issue{} = issue, trace_id) when is_binary(trace_id),
+    do: Map.put(issue, :trace_id, trace_id)
+
+  defp attach_trace_id(issue, _trace_id), do: issue
+
+  defp maybe_put_trace_id_opt(opts, trace_id) when is_binary(trace_id),
+    do: Keyword.put(opts, :trace_id, trace_id)
+
+  defp maybe_put_trace_id_opt(opts, _trace_id), do: opts
+
+  defp with_issue_logger_metadata(issue, trace_id, fun) when is_function(fun, 0) do
+    previous_metadata = Logger.metadata()
+
+    metadata =
+      []
+      |> maybe_put_logger_metadata(:issue_identifier, Map.get(issue, :identifier))
+      |> maybe_put_logger_metadata(:trace_id, trace_id)
+
+    if metadata != [] do
+      Logger.metadata(metadata)
+    end
+
+    try do
+      fun.()
+    after
+      Logger.reset_metadata(previous_metadata)
+    end
+  end
+
+  defp maybe_put_logger_metadata(metadata, _key, value) when value in [nil, ""], do: metadata
+  defp maybe_put_logger_metadata(metadata, key, value), do: Keyword.put(metadata, key, value)
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"

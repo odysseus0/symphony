@@ -712,7 +712,12 @@ defmodule SymphonyElixir.StatusDashboard do
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
     event = running_entry.last_codex_event || "none"
-    event_label = format_cell(summarize_message(running_entry.last_codex_message), running_event_width)
+
+    event_label =
+      format_cell(
+        summarize_message_with_trace(running_entry.last_codex_message, Map.get(running_entry, :trace_id)),
+        running_event_width
+      )
 
     tokens = format_count(total_tokens) |> format_cell(@running_tokens_width, :right)
 
@@ -1233,6 +1238,17 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp summarize_message(message), do: humanize_codex_message(message)
+
+  defp summarize_message_with_trace(message, trace_id) when is_binary(trace_id) and trace_id != "" do
+    trace_display =
+      trace_id
+      |> String.replace("-", "")
+      |> String.slice(0, 8)
+
+    "[#{trace_display}] " <> summarize_message(message)
+  end
+
+  defp summarize_message_with_trace(message, _trace_id), do: summarize_message(message)
 
   defp humanize_codex_event(:session_started, _message, payload) do
     session_id = map_value(payload, ["session_id", :session_id])

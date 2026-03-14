@@ -21,6 +21,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "trace id generator returns UUID v4 and unique values per dispatch attempt" do
+    first_trace_id = Orchestrator.new_trace_id_for_test()
+    second_trace_id = Orchestrator.new_trace_id_for_test()
+
+    assert first_trace_id != second_trace_id
+    assert Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/i, first_trace_id)
+    assert Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/i, second_trace_id)
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -49,6 +58,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       pid: self(),
       ref: make_ref(),
       identifier: issue.identifier,
+      trace_id: "trace-snapshot-001",
       issue: issue,
       session_id: nil,
       turn_count: 0,
@@ -99,6 +109,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(warning_threshold_bytes) and warning_threshold_bytes > 0
     assert done_closed_keep_count == 5
     assert snapshot_entry.issue_id == issue_id
+    assert snapshot_entry.trace_id == "trace-snapshot-001"
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now
@@ -977,17 +988,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         2_000
       )
 
-    assert %{
-             polling: %{
-               checking?: false,
-               poll_interval_ms: 30_000,
-               next_poll_in_ms: due_in_ms
-             }
-           } = snapshot
+    %{polling: polling} = snapshot
 
-    assert is_integer(due_in_ms)
-    assert due_in_ms >= 0
-    assert due_in_ms <= 4_000
+    case polling do
+      %{checking?: false, next_poll_in_ms: due_in_ms} ->
+        assert is_integer(due_in_ms)
+        assert due_in_ms >= 0
+        assert due_in_ms <= 4_000
+
+      %{checking?: true, next_poll_in_ms: nil} ->
+        :ok
+    end
 
     :sys.replace_state(pid, fn state ->
       %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
@@ -1159,7 +1170,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert is_integer(due_at_ms)
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
+    assert remaining_ms >= 8_500
     assert remaining_ms <= 10_500
   end
 

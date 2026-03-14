@@ -117,6 +117,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
+      trace_id: Map.get(entry, :trace_id),
       state: entry.state,
       session_id: entry.session_id,
       turn_count: Map.get(entry, :turn_count, 0),
@@ -145,6 +146,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp running_issue_payload(running) do
     %{
+      trace_id: Map.get(running, :trace_id),
       session_id: running.session_id,
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,

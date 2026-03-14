@@ -693,6 +693,64 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace before_run hook receives SYMPHONY_TRACE_ID env var" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-before-run-trace-id-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      trace_marker = Path.join(test_root, "trace-id.log")
+
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: "printf '%s' \"$SYMPHONY_TRACE_ID\" > \"#{trace_marker}\""
+      )
+
+      issue = %{id: "issue-trace-id", identifier: "MT-TRACE-ID"}
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
+      assert :ok =
+               Workspace.run_before_run_hook(workspace, issue, trace_id: "trace-env-001")
+
+      assert File.read!(trace_marker) == "trace-env-001"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace before_run hook receives SYMPHONY_TRACE_ID" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hooks-trace-id-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      trace_output = Path.join(test_root, "trace_id.log")
+
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: "printf '%s' \"${SYMPHONY_TRACE_ID:-}\" > \"#{trace_output}\""
+      )
+
+      issue = %{id: "issue-trace-hook", identifier: "MT-TRACE", trace_id: "trace-test-001"}
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert :ok = Workspace.run_before_run_hook(workspace, issue)
+      assert File.read!(trace_output) == "trace-test-001"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace remove continues when before_remove hook fails" do
     test_root =
       Path.join(

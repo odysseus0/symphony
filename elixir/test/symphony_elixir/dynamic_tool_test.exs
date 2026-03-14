@@ -412,6 +412,28 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["success"] == true
   end
 
+  test "sync_workpad appends trace_id note when trace context is provided" do
+    test_pid = self()
+    path = write_tmp_workpad("## Codex Workpad\n\n### Notes\n\n- existing note")
+
+    response =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"issue_id" => "ENG-42", "file_path" => path},
+        trace_id: "trace-sync-001",
+        linear_client: fn query, variables, _opts ->
+          send(test_pid, {:graphql, query, variables})
+          {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "c1", "url" => "https://linear.app/c1"}}}}}
+        end
+      )
+
+    assert_received {:graphql, query, %{"issueId" => "ENG-42", "body" => body}}
+    assert query =~ "commentCreate"
+    assert body =~ "### Notes"
+    assert body =~ "- trace_id: `trace-sync-001`"
+    assert response["success"] == true
+  end
+
   test "sync_workpad validates required arguments before calling Linear" do
     no_issue =
       DynamicTool.execute(

@@ -110,9 +110,9 @@ defmodule SymphonyElixir.Workspace do
     {:ok, %{kept: kept, removed: removed}}
   end
 
-  @spec run_before_run_hook(Path.t(), map() | String.t() | nil) :: :ok | {:error, term()}
-  def run_before_run_hook(workspace, issue_or_identifier) when is_binary(workspace) do
-    issue_context = issue_context(issue_or_identifier)
+  @spec run_before_run_hook(Path.t(), map() | String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def run_before_run_hook(workspace, issue_or_identifier, opts \\ []) when is_binary(workspace) do
+    issue_context = issue_context(issue_or_identifier, opts)
     hooks = Config.settings!().hooks
 
     case hooks.before_run do
@@ -124,9 +124,9 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil) :: :ok
-  def run_after_run_hook(workspace, issue_or_identifier) when is_binary(workspace) do
-    issue_context = issue_context(issue_or_identifier)
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, keyword()) :: :ok
+  def run_after_run_hook(workspace, issue_or_identifier, opts \\ []) when is_binary(workspace) do
+    issue_context = issue_context(issue_or_identifier, opts)
     hooks = Config.settings!().hooks
 
     case hooks.after_run do
@@ -273,7 +273,7 @@ defmodule SymphonyElixir.Workspace do
             run_hook(
               command,
               workspace,
-              %{issue_id: nil, issue_identifier: Path.basename(workspace)},
+              %{issue_id: nil, issue_identifier: Path.basename(workspace), trace_id: nil},
               "before_remove"
             )
             |> ignore_hook_failure()
@@ -289,12 +289,13 @@ defmodule SymphonyElixir.Workspace do
 
   defp run_hook(command, workspace, issue_context, hook_name) do
     timeout_ms = Config.settings!().hooks.timeout_ms
+    env = hook_env(issue_context)
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace}")
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true, env: env)
       end)
 
     case Task.yield(task, timeout_ms) do
@@ -362,28 +363,44 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp issue_context(%{id: issue_id, identifier: identifier}) do
+  defp issue_context(issue_or_identifier, opts \\ [])
+
+  defp issue_context(%{id: issue_id, identifier: identifier} = issue, opts) do
     %{
       issue_id: issue_id,
-      issue_identifier: identifier || "issue"
+      issue_identifier: identifier || "issue",
+      trace_id: Keyword.get(opts, :trace_id) || issue_trace_id(issue)
     }
   end
 
-  defp issue_context(identifier) when is_binary(identifier) do
+  defp issue_context(identifier, opts) when is_binary(identifier) do
     %{
       issue_id: nil,
-      issue_identifier: identifier
+      issue_identifier: identifier,
+      trace_id: Keyword.get(opts, :trace_id)
     }
   end
 
-  defp issue_context(_identifier) do
+  defp issue_context(_identifier, opts) do
     %{
       issue_id: nil,
-      issue_identifier: "issue"
+      issue_identifier: "issue",
+      trace_id: Keyword.get(opts, :trace_id)
     }
   end
 
-  defp issue_log_context(%{issue_id: issue_id, issue_identifier: issue_identifier}) do
-    "issue_id=#{issue_id || "n/a"} issue_identifier=#{issue_identifier || "issue"}"
+  defp issue_log_context(%{issue_id: issue_id, issue_identifier: issue_identifier, trace_id: trace_id}) do
+    "issue_id=#{issue_id || "n/a"} issue_identifier=#{issue_identifier || "issue"} trace_id=#{trace_id || "n/a"}"
   end
+
+  defp hook_env(issue_context) when is_map(issue_context) do
+    []
+    |> maybe_put_env("SYMPHONY_TRACE_ID", Map.get(issue_context, :trace_id))
+  end
+
+  defp issue_trace_id(%{trace_id: trace_id}) when is_binary(trace_id), do: trace_id
+  defp issue_trace_id(_issue), do: nil
+
+  defp maybe_put_env(env, _name, value) when value in [nil, ""], do: env
+  defp maybe_put_env(env, name, value), do: [{name, value} | env]
 end

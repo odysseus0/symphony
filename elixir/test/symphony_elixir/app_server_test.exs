@@ -76,6 +76,79 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server emits trace_id in codex session events" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-trace-id-events-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-TRACE-ID")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-trace"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-trace"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-trace-id",
+        identifier: "MT-TRACE-ID",
+        title: "Trace metadata",
+        description: "Ensure AppServer emits trace metadata on events",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-TRACE-ID",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Emit events with trace id", issue,
+                 on_message: on_message,
+                 trace_id: "trace-app-001"
+               )
+
+      assert_receive {:app_server_message, %{event: :session_started, trace_id: "trace-app-001"}}
+      assert_receive {:app_server_message, %{event: :turn_completed, trace_id: "trace-app-001"}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server passes explicit turn sandbox policies through unchanged" do
     test_root =
       Path.join(
