@@ -119,7 +119,8 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_identifier: entry.identifier,
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
-      error: entry.error
+      error: entry.error,
+      error_class: entry.error_class
     }
   end
 
@@ -144,7 +145,8 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       attempt: retry.attempt,
       due_at: due_at_iso8601(retry.due_in_ms),
-      error: retry.error
+      error: retry.error,
+      error_class: retry.error_class
     }
   end
 

@@ -105,25 +105,29 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
              identifier: "MT-450",
              attempt: 4,
              due_in_ms: 1_250,
-             error: "rate limit exhausted"
+             error: "rate limit exhausted",
+             error_class: "transient"
            }),
            retry_entry(%{
              identifier: "MT-451",
              attempt: 2,
              due_in_ms: 3_900,
-             error: "retrying after API timeout with jitter"
+             error: "retrying after API timeout with jitter",
+             error_class: "transient"
            }),
            retry_entry(%{
              identifier: "MT-452",
              attempt: 6,
              due_in_ms: 8_100,
-             error: "worker crashed\nrestarting cleanly"
+             error: "worker crashed\nrestarting cleanly",
+             error_class: "semi_permanent"
            }),
            retry_entry(%{
              identifier: "MT-453",
              attempt: 1,
              due_in_ms: 11_000,
-             error: "fourth queued retry should also render after removing the top-three limit"
+             error: "fourth queued retry should also render after removing the top-three limit",
+             error_class: "permanent"
            })
          ],
          codex_totals: %{input_tokens: 18_000, output_tokens: 2_200, total_tokens: 20_200, seconds_running: 2_700},
@@ -148,7 +152,8 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
              identifier: "MT-980",
              attempt: 1,
              due_in_ms: 1_500,
-             error: "error with \\nnewline"
+             error: "error with \\nnewline",
+             error_class: "transient"
            })
          ],
          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
@@ -162,6 +167,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
 
     [backoff_line] = backoff_lines
 
+    assert backoff_line =~ "class=transient"
     assert backoff_line =~ "error=error with newline"
     refute backoff_line =~ "\\n"
   end
@@ -222,7 +228,8 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
         identifier: "MT-000",
         attempt: 1,
         due_in_ms: 1_000,
-        error: "retry scheduled"
+        error: "retry scheduled",
+        error_class: nil
       },
       overrides
     )

@@ -224,6 +224,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>Issue</th>
                     <th>Attempt</th>
                     <th>Due at</th>
+                    <th>Class</th>
                     <th>Error</th>
                   </tr>
                 </thead>
@@ -237,6 +238,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     </td>
                     <td><%= entry.attempt %></td>
                     <td class="mono"><%= entry.due_at || "n/a" %></td>
+                    <td class="mono"><%= entry.error_class || "n/a" %></td>
                     <td><%= entry.error || "n/a" %></td>
                   </tr>
                 </tbody>

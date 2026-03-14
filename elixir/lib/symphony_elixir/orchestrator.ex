@@ -7,13 +7,14 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, ErrorClassifier, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_base_delay_ms 5_000
   @continuation_max_delay_ms 300_000
   @max_continuation_retries 5
   @failure_retry_base_ms 10_000
+  @human_review_state "Human Review"
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -150,14 +151,27 @@ defmodule SymphonyElixir.Orchestrator do
               })
 
             _ ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+              failure_attempt =
+                case next_retry_attempt_from_running(running_entry) do
+                  attempt when is_integer(attempt) and attempt > 0 -> attempt
+                  _ -> 1
+                end
 
-              next_attempt = next_retry_attempt_from_running(running_entry)
+              issue = Map.get(running_entry, :issue)
+              error_class = ErrorClassifier.classify(reason)
+              error_class_label = ErrorClassifier.to_string(error_class)
 
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}"
-              })
+              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} error_class=#{error_class_label} next_retry_attempt=#{failure_attempt}")
+
+              handle_worker_failure(
+                state,
+                issue,
+                issue_id,
+                running_entry.identifier || issue_id,
+                reason,
+                error_class,
+                failure_attempt
+              )
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -459,7 +473,8 @@ defmodule SymphonyElixir.Orchestrator do
       |> terminate_running_issue(issue_id, false)
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
-        error: "stalled for #{elapsed_ms}ms without codex activity"
+        error: "stalled for #{elapsed_ms}ms without codex activity",
+        error_class: ErrorClassifier.to_string(:transient)
       })
     else
       state
@@ -706,7 +721,8 @@ defmodule SymphonyElixir.Orchestrator do
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
           identifier: issue.identifier,
-          error: "failed to spawn agent: #{inspect(reason)}"
+          error: "failed to spawn agent: #{inspect(reason)}",
+          error_class: ErrorClassifier.to_string(:transient)
         })
     end
   end
@@ -749,6 +765,7 @@ defmodule SymphonyElixir.Orchestrator do
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
     error = pick_retry_error(previous_retry, metadata)
+    error_class = pick_retry_error_class(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -757,8 +774,9 @@ defmodule SymphonyElixir.Orchestrator do
     timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
 
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
+    error_class_suffix = if is_binary(error_class), do: " error_class=#{error_class}", else: ""
 
-    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_class_suffix}#{error_suffix}")
 
     %{
       state
@@ -770,6 +788,7 @@ defmodule SymphonyElixir.Orchestrator do
             due_at_ms: due_at_ms,
             identifier: identifier,
             error: error,
+            error_class: error_class,
             delay_type: metadata[:delay_type]
           })
     }
@@ -781,6 +800,7 @@ defmodule SymphonyElixir.Orchestrator do
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
           error: Map.get(retry_entry, :error),
+          error_class: Map.get(retry_entry, :error_class),
           delay_type: Map.get(retry_entry, :delay_type)
         }
 
@@ -806,7 +826,10 @@ defmodule SymphonyElixir.Orchestrator do
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{
+             error: "retry poll failed: #{inspect(reason)}",
+             error_class: ErrorClassifier.to_string(:transient)
+           })
          )}
     end
   end
@@ -865,9 +888,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_active_retry(state, issue, attempt, %{delay_type: :continuation} = _metadata)
        when is_integer(attempt) and attempt > @max_continuation_retries do
-    Logger.warning(
-      "Max continuation retries (#{@max_continuation_retries}) reached for #{issue_context(issue)}; releasing claim"
-    )
+    Logger.warning("Max continuation retries (#{@max_continuation_retries}) reached for #{issue_context(issue)}; releasing claim")
 
     {:noreply, release_issue_claim(state, issue.id)}
   end
@@ -886,11 +907,99 @@ defmodule SymphonyElixir.Orchestrator do
          attempt + 1,
          Map.merge(metadata, %{
            identifier: issue.identifier,
-           error: "no available orchestrator slots"
+           error: "no available orchestrator slots",
+           error_class: ErrorClassifier.to_string(:transient)
          })
        )}
     end
   end
+
+  defp handle_worker_failure(state, issue, issue_id, identifier, reason, error_class, failure_attempt) do
+    error_class_label = ErrorClassifier.to_string(error_class)
+
+    if ErrorClassifier.retry_allowed?(error_class, failure_attempt) do
+      schedule_issue_retry(state, issue_id, failure_attempt, %{
+        identifier: identifier,
+        error: "agent exited: #{inspect(reason)}",
+        error_class: error_class_label
+      })
+    else
+      escalate_issue_to_human_review(
+        state,
+        issue,
+        issue_id,
+        identifier,
+        reason,
+        error_class_label,
+        failure_attempt
+      )
+    end
+  end
+
+  defp escalate_issue_to_human_review(
+         state,
+         %Issue{id: tracker_issue_id} = issue,
+         issue_id,
+         identifier,
+         reason,
+         error_class,
+         failure_attempt
+       )
+       when is_binary(tracker_issue_id) do
+    blocker_comment = blocker_comment_body(identifier, reason, error_class, failure_attempt)
+
+    with :ok <- Tracker.create_comment(tracker_issue_id, blocker_comment),
+         :ok <- Tracker.update_issue_state(tracker_issue_id, @human_review_state) do
+      Logger.warning("Escalated issue_id=#{issue_id} issue_identifier=#{identifier} to #{@human_review_state} after #{error_class} failure (attempt #{failure_attempt})")
+
+      state
+      |> complete_issue(issue_id)
+      |> release_issue_claim(issue_id)
+    else
+      {:error, tracker_reason} ->
+        Logger.error("Failed to escalate issue_id=#{issue_id} issue_identifier=#{identifier} to #{@human_review_state}: #{inspect(tracker_reason)}")
+
+        schedule_issue_retry(state, issue_id, failure_attempt, %{
+          identifier: identifier,
+          error: "failed to escalate #{issue_identifier(issue, identifier)} to #{@human_review_state}: #{inspect(tracker_reason)}",
+          error_class: ErrorClassifier.to_string(:transient)
+        })
+    end
+  end
+
+  defp escalate_issue_to_human_review(
+         state,
+         issue,
+         issue_id,
+         identifier,
+         _reason,
+         _error_class,
+         failure_attempt
+       ) do
+    Logger.error("Failed to escalate issue_id=#{issue_id} issue_identifier=#{identifier} due to missing tracker issue id in running entry: #{inspect(issue)}")
+
+    schedule_issue_retry(state, issue_id, failure_attempt, %{
+      identifier: identifier,
+      error: "failed to escalate #{identifier} to #{@human_review_state}: missing issue id",
+      error_class: ErrorClassifier.to_string(:transient)
+    })
+  end
+
+  defp blocker_comment_body(identifier, reason, error_class, failure_attempt) do
+    summary = ErrorClassifier.summarize_reason(reason)
+
+    """
+    ### Blocker (auto-classified)
+
+    - error_class: `#{error_class}`
+    - failed_attempt: `#{failure_attempt}`
+    - issue: `#{identifier}`
+    - reason: `#{summary}`
+    """
+  end
+
+  defp issue_identifier(%Issue{identifier: identifier}, _fallback) when is_binary(identifier), do: identifier
+  defp issue_identifier(_issue, fallback), do: fallback
 
   defp release_issue_claim(%State{} = state, issue_id) do
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
@@ -926,6 +1035,20 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_error(previous_retry, metadata) do
     metadata[:error] || Map.get(previous_retry, :error)
+  end
+
+  defp pick_retry_error_class(previous_retry, metadata) do
+    case metadata[:error_class] || Map.get(previous_retry, :error_class) do
+      value when is_binary(value) and value != "" ->
+        value
+
+      _ ->
+        if metadata[:delay_type] == :continuation do
+          nil
+        else
+          ErrorClassifier.to_string(:transient)
+        end
+    end
   end
 
   defp find_issue_by_id(issues, issue_id) when is_binary(issue_id) do
@@ -1028,7 +1151,8 @@ defmodule SymphonyElixir.Orchestrator do
           attempt: attempt,
           due_in_ms: max(0, due_at_ms - now_ms),
           identifier: Map.get(retry, :identifier),
-          error: Map.get(retry, :error)
+          error: Map.get(retry, :error),
+          error_class: Map.get(retry, :error_class)
         }
       end)
 
