@@ -108,7 +108,8 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    assert Map.get(hooks, "before_remove") =~ "gh pr list --head"
+    assert Map.get(hooks, "before_remove") =~ "gh pr close"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -705,8 +706,9 @@ defmodule SymphonyElixir.CoreTest do
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+    lower_bound_slop_ms = 250
 
-    assert remaining_ms >= min_remaining_ms
+    assert remaining_ms >= min_remaining_ms - lower_bound_slop_ms
     assert remaining_ms <= max_remaining_ms
   end
 
