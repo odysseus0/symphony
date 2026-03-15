@@ -53,7 +53,8 @@ defmodule SymphonyElixir.Orchestrator do
       stats_turn_tokens: [],
       stats_linear_response_time_ms: [],
       stats_issue_started_at_ms: %{},
-      stats_finalized_issue_ids: MapSet.new()
+      stats_finalized_issue_ids: MapSet.new(),
+      dispatch_wave: nil
     ]
   end
 
@@ -279,8 +280,7 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
+         {:ok, issues} <- Tracker.fetch_candidate_issues() do
       choose_issues(issues, state)
     else
       {:error, :missing_linear_api_token} ->
@@ -319,9 +319,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
         state
     end
   end
@@ -385,6 +382,16 @@ defmodule SymphonyElixir.Orchestrator do
   @spec new_trace_id_for_test() :: String.t()
   def new_trace_id_for_test do
     new_trace_id()
+  end
+
+  @doc false
+  @spec issue_waves_for_dispatch_for_test([Issue.t()]) :: [[Issue.t()]]
+  def issue_waves_for_dispatch_for_test(issues) when is_list(issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+    candidates = dispatch_candidates(issues, active_states, terminal_states)
+    {waves, _unresolved_count} = build_issue_waves(candidates, terminal_states)
+    waves
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -582,16 +589,23 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
+    candidates = dispatch_candidates(issues, active_states, terminal_states)
+    {waves, unresolved_count} = build_issue_waves(candidates, terminal_states)
+    state = put_dispatch_wave_status(state, waves, unresolved_count)
 
-    issues
-    |> sort_issues_for_dispatch()
-    |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
-      else
-        state_acc
-      end
-    end)
+    case waves do
+      [current_wave | _rest] ->
+        Enum.reduce(current_wave, state, fn issue, state_acc ->
+          if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
+            dispatch_issue(state_acc, issue)
+          else
+            state_acc
+          end
+        end)
+
+      [] ->
+        state
+    end
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -613,6 +627,242 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_created_at_sort_key(%Issue{}), do: 9_223_372_036_854_775_807
   defp issue_created_at_sort_key(_issue), do: 9_223_372_036_854_775_807
+
+  defp dispatch_candidates(issues, active_states, terminal_states)
+       when is_list(issues) and is_struct(active_states, MapSet) and
+              is_struct(terminal_states, MapSet) do
+    Enum.filter(issues, &candidate_issue?(&1, active_states, terminal_states))
+  end
+
+  defp dispatch_candidates(_issues, _active_states, _terminal_states), do: []
+
+  defp build_issue_waves(issues, terminal_states)
+       when is_list(issues) and is_struct(terminal_states, MapSet) do
+    sorted_issues = sort_issues_for_dispatch(issues)
+
+    issues_by_id =
+      sorted_issues
+      |> Enum.reduce(%{}, fn
+        %Issue{id: issue_id} = issue, acc when is_binary(issue_id) ->
+          Map.put(acc, issue_id, issue)
+
+        _issue, acc ->
+          acc
+      end)
+
+    ids = Map.keys(issues_by_id)
+
+    {adjacency, indegree, externally_blocked} =
+      Enum.reduce(ids, {%{}, %{}, MapSet.new()}, fn issue_id, {adj, indegree_acc, external} ->
+        {
+          Map.put(adj, issue_id, MapSet.new()),
+          Map.put(indegree_acc, issue_id, 0),
+          external
+        }
+      end)
+
+    {adjacency, indegree, externally_blocked} =
+      Enum.reduce(issues_by_id, {adjacency, indegree, externally_blocked}, fn
+        {issue_id, %Issue{} = issue}, graph ->
+          add_issue_wave_edges(graph, issue_id, issue, issues_by_id, terminal_states)
+
+        _entry, graph ->
+          graph
+      end)
+
+    build_issue_waves_loop(
+      MapSet.new(ids),
+      issues_by_id,
+      adjacency,
+      indegree,
+      externally_blocked,
+      []
+    )
+  end
+
+  defp build_issue_waves(_issues, _terminal_states), do: {[], 0}
+
+  defp build_issue_waves_loop(
+         remaining_ids,
+         issues_by_id,
+         adjacency,
+         indegree,
+         externally_blocked,
+         waves
+       )
+       when is_struct(remaining_ids, MapSet) and is_map(issues_by_id) and is_map(adjacency) and
+              is_map(indegree) and is_struct(externally_blocked, MapSet) and is_list(waves) do
+    ready_ids = wave_ready_ids(remaining_ids, indegree, externally_blocked)
+
+    case ready_ids do
+      [] ->
+        {Enum.reverse(waves), MapSet.size(remaining_ids)}
+
+      _ ->
+        current_wave =
+          ready_ids
+          |> Enum.map(&Map.fetch!(issues_by_id, &1))
+          |> sort_issues_for_dispatch()
+
+        {remaining_ids, indegree} =
+          Enum.reduce(ready_ids, {remaining_ids, indegree}, fn issue_id, {remaining_acc, indegree_acc} ->
+            neighbors = Map.get(adjacency, issue_id, MapSet.new())
+
+            indegree_acc =
+              Enum.reduce(neighbors, indegree_acc, fn neighbor_id, indegree_inner ->
+                Map.update(indegree_inner, neighbor_id, 0, &max(&1 - 1, 0))
+              end)
+
+            {MapSet.delete(remaining_acc, issue_id), indegree_acc}
+          end)
+
+        build_issue_waves_loop(
+          remaining_ids,
+          issues_by_id,
+          adjacency,
+          indegree,
+          externally_blocked,
+          [current_wave | waves]
+        )
+    end
+  end
+
+  defp wave_ready_ids(remaining_ids, indegree, externally_blocked)
+       when is_struct(remaining_ids, MapSet) and is_map(indegree) and is_struct(externally_blocked, MapSet) do
+    remaining_ids
+    |> Enum.reject(&MapSet.member?(externally_blocked, &1))
+    |> Enum.filter(&(Map.get(indegree, &1, 0) == 0))
+  end
+
+  defp add_issue_wave_edges(
+         {adjacency, indegree, externally_blocked},
+         issue_id,
+         issue,
+         issues_by_id,
+         terminal_states
+       )
+       when is_binary(issue_id) and is_map(adjacency) and is_map(indegree) and
+              is_struct(externally_blocked, MapSet) and is_map(issues_by_id) and
+              is_struct(terminal_states, MapSet) do
+    blockers =
+      issue
+      |> non_terminal_todo_blockers(terminal_states)
+      |> Enum.uniq()
+
+    Enum.reduce(blockers, {adjacency, indegree, externally_blocked}, fn blocker, graph ->
+      case blocker do
+        %{id: blocker_id} when is_binary(blocker_id) ->
+          cond do
+            blocker_id == issue_id ->
+              {adj, ind, external} = graph
+              {adj, ind, MapSet.put(external, issue_id)}
+
+            Map.has_key?(issues_by_id, blocker_id) ->
+              link_wave_dependency(graph, blocker_id, issue_id)
+
+            true ->
+              {adj, ind, external} = graph
+              {adj, ind, MapSet.put(external, issue_id)}
+          end
+
+        _ ->
+          {adj, ind, external} = graph
+          {adj, ind, MapSet.put(external, issue_id)}
+      end
+    end)
+  end
+
+  defp link_wave_dependency(
+         {adjacency, indegree, externally_blocked},
+         blocker_id,
+         issue_id
+       )
+       when is_binary(blocker_id) and is_binary(issue_id) and is_map(adjacency) and is_map(indegree) and
+              is_struct(externally_blocked, MapSet) do
+    neighbors = Map.get(adjacency, blocker_id, MapSet.new())
+
+    if MapSet.member?(neighbors, issue_id) do
+      {adjacency, indegree, externally_blocked}
+    else
+      adjacency = Map.put(adjacency, blocker_id, MapSet.put(neighbors, issue_id))
+      indegree = Map.update(indegree, issue_id, 1, &(&1 + 1))
+      {adjacency, indegree, externally_blocked}
+    end
+  end
+
+  defp non_terminal_todo_blockers(
+         %Issue{state: issue_state, blocked_by: blockers},
+         terminal_states
+       )
+       when is_binary(issue_state) and is_list(blockers) and is_struct(terminal_states, MapSet) do
+    if normalize_issue_state(issue_state) == "todo" do
+      Enum.filter(blockers, fn
+        %{state: blocker_state} when is_binary(blocker_state) ->
+          !terminal_issue_state?(blocker_state, terminal_states)
+
+        _ ->
+          true
+      end)
+    else
+      []
+    end
+  end
+
+  defp non_terminal_todo_blockers(_issue, _terminal_states), do: []
+
+  defp put_dispatch_wave_status(%State{} = state, waves, unresolved_count)
+       when is_list(waves) and is_integer(unresolved_count) and unresolved_count >= 0 do
+    case waves do
+      [current_wave | _rest] ->
+        {current_total, current_dispatched} = dispatch_wave_progress(state, current_wave)
+
+        %{
+          state
+          | dispatch_wave: %{
+              current: 1,
+              total: length(waves),
+              current_total: current_total,
+              current_dispatched: current_dispatched,
+              unresolved: unresolved_count
+            }
+        }
+
+      [] when unresolved_count > 0 ->
+        %{
+          state
+          | dispatch_wave: %{
+              current: nil,
+              total: 0,
+              current_total: 0,
+              current_dispatched: 0,
+              unresolved: unresolved_count
+            }
+        }
+
+      [] ->
+        %{state | dispatch_wave: nil}
+    end
+  end
+
+  defp put_dispatch_wave_status(state, _waves, _unresolved_count), do: state
+
+  defp dispatch_wave_progress(%State{} = state, issues) when is_list(issues) do
+    issue_ids =
+      issues
+      |> Enum.flat_map(fn
+        %Issue{id: issue_id} when is_binary(issue_id) -> [issue_id]
+        _ -> []
+      end)
+
+    dispatched_count =
+      Enum.count(issue_ids, fn issue_id ->
+        MapSet.member?(state.claimed, issue_id) or Map.has_key?(state.running, issue_id)
+      end)
+
+    {length(issue_ids), dispatched_count}
+  end
+
+  defp dispatch_wave_progress(_state, _issues), do: {0, 0}
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
@@ -1452,6 +1702,7 @@ defmodule SymphonyElixir.Orchestrator do
        stats: snapshot_stats(state),
        rate_limits: Map.get(state, :codex_rate_limits),
        workspace: workspace_snapshot(state),
+       wave: Map.get(state, :dispatch_wave),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),

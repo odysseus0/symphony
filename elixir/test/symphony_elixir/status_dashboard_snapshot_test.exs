@@ -256,6 +256,25 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     assert rendered =~ "linear_p95=450ms"
   end
 
+  test "dashboard renders wave progress when present in snapshot data" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         wave: %{current: 2, total: 4, current_dispatched: 1, current_total: 3, unresolved: 0}
+       }}
+
+    rendered =
+      snapshot_data
+      |> render_snapshot(0.0)
+      |> Snapshot.strip_ansi()
+
+    assert rendered =~ "Wave: 2/4 (1/3 dispatched)"
+  end
+
   defp render_snapshot(snapshot_data, tps) do
     StatusDashboard.format_snapshot_content_for_test(snapshot_data, tps, @terminal_columns)
   end

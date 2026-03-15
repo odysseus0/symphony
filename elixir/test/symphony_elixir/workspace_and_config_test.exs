@@ -557,6 +557,113 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(sorted, & &1.identifier) == ["MT-200", "MT-201", "MT-199"]
   end
 
+  test "orchestrator builds chained dependency waves and advances only after blockers become terminal" do
+    issue_a = %Issue{
+      id: "issue-a",
+      identifier: "MT-801",
+      title: "A",
+      state: "Todo",
+      priority: 2,
+      blocked_by: [],
+      created_at: ~U[2026-01-01 00:00:00Z]
+    }
+
+    issue_b = %Issue{
+      id: "issue-b",
+      identifier: "MT-802",
+      title: "B",
+      state: "Todo",
+      priority: 2,
+      blocked_by: [%{id: "issue-a", identifier: "MT-801", state: "Todo"}],
+      created_at: ~U[2026-01-02 00:00:00Z]
+    }
+
+    issue_c = %Issue{
+      id: "issue-c",
+      identifier: "MT-803",
+      title: "C",
+      state: "Todo",
+      priority: 2,
+      blocked_by: [%{id: "issue-b", identifier: "MT-802", state: "Todo"}],
+      created_at: ~U[2026-01-03 00:00:00Z]
+    }
+
+    stage_1_waves =
+      Orchestrator.issue_waves_for_dispatch_for_test([
+        issue_c,
+        issue_b,
+        issue_a
+      ])
+
+    assert Enum.map(stage_1_waves, fn wave -> Enum.map(wave, & &1.identifier) end) == [
+             ["MT-801"],
+             ["MT-802"],
+             ["MT-803"]
+           ]
+
+    stage_2_waves =
+      Orchestrator.issue_waves_for_dispatch_for_test([
+        issue_c,
+        %{issue_b | blocked_by: [%{id: "issue-a", identifier: "MT-801", state: "Done"}]}
+      ])
+
+    assert Enum.map(stage_2_waves, fn wave -> Enum.map(wave, & &1.identifier) end) == [
+             ["MT-802"],
+             ["MT-803"]
+           ]
+
+    stage_3_waves =
+      Orchestrator.issue_waves_for_dispatch_for_test([
+        %{issue_c | blocked_by: [%{id: "issue-b", identifier: "MT-802", state: "Done"}]}
+      ])
+
+    assert Enum.map(stage_3_waves, fn wave -> Enum.map(wave, & &1.identifier) end) == [["MT-803"]]
+  end
+
+  test "orchestrator places independent todo issues in the same wave" do
+    issue_a = %Issue{
+      id: "issue-w1-a",
+      identifier: "MT-811",
+      title: "W1-A",
+      state: "Todo",
+      priority: 2,
+      blocked_by: [],
+      created_at: ~U[2026-01-01 00:00:00Z]
+    }
+
+    issue_b = %Issue{
+      id: "issue-w1-b",
+      identifier: "MT-812",
+      title: "W1-B",
+      state: "Todo",
+      priority: 1,
+      blocked_by: [],
+      created_at: ~U[2026-01-02 00:00:00Z]
+    }
+
+    issue_c = %Issue{
+      id: "issue-w2",
+      identifier: "MT-813",
+      title: "W2",
+      state: "Todo",
+      priority: 1,
+      blocked_by: [%{id: "issue-w1-a", identifier: "MT-811", state: "Todo"}],
+      created_at: ~U[2026-01-03 00:00:00Z]
+    }
+
+    waves =
+      Orchestrator.issue_waves_for_dispatch_for_test([
+        issue_c,
+        issue_b,
+        issue_a
+      ])
+
+    assert Enum.map(waves, fn wave -> Enum.map(wave, & &1.identifier) end) == [
+             ["MT-812", "MT-811"],
+             ["MT-813"]
+           ]
+  end
+
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,

@@ -320,7 +320,8 @@ defmodule SymphonyElixir.StatusDashboard do
              stats: Map.get(snapshot, :stats),
              rate_limits: Map.get(snapshot, :rate_limits),
              workspace: Map.get(snapshot, :workspace),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             wave: Map.get(snapshot, :wave)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -343,6 +344,7 @@ defmodule SymphonyElixir.StatusDashboard do
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         workspace_line = format_workspace_usage_lines(workspace)
+        wave_line = format_wave_line(Map.get(snapshot, :wave))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
         codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
@@ -374,6 +376,7 @@ defmodule SymphonyElixir.StatusDashboard do
            stats_lines,
            project_link_lines,
            project_refresh_line,
+           wave_line,
            colorize("├─ Running", @ansi_bold),
            "│",
            running_table_header_row(running_event_width),
@@ -513,6 +516,28 @@ defmodule SymphonyElixir.StatusDashboard do
       line -> [line]
     end
   end
+
+  defp format_wave_line(%{
+         current: current,
+         total: total,
+         current_dispatched: current_dispatched,
+         current_total: current_total
+       })
+       when is_integer(current) and current > 0 and is_integer(total) and total > 0 and
+              is_integer(current_dispatched) and current_dispatched >= 0 and
+              is_integer(current_total) and current_total >= 0 do
+    colorize("│ Wave: ", @ansi_bold) <>
+      colorize("#{current}/#{total}", @ansi_cyan) <>
+      colorize(" (#{current_dispatched}/#{current_total} dispatched)", @ansi_gray)
+  end
+
+  defp format_wave_line(%{unresolved: unresolved}) when is_integer(unresolved) and unresolved > 0 do
+    colorize("│ Wave: ", @ansi_bold) <>
+      colorize("blocked", @ansi_orange) <>
+      colorize(" (#{unresolved} unresolved)", @ansi_gray)
+  end
+
+  defp format_wave_line(_), do: []
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
 
