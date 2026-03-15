@@ -50,7 +50,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          {:ok, port} <- start_port(expanded_workspace, command) do
       metadata = session_metadata(port, opts)
 
-      with {:ok, session_policies} <- session_policies(expanded_workspace),
+      with {:ok, session_policies} <- session_policies(expanded_workspace, opts),
            {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
         {:ok,
          %{
@@ -251,8 +251,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp session_policies(workspace) do
-    Config.codex_runtime_settings(workspace)
+  defp session_policies(workspace, opts) do
+    with {:ok, config_settings} <- Config.codex_runtime_settings(workspace) do
+      {:ok, %{
+        approval_policy: Keyword.get(opts, :approval_policy) || config_settings.approval_policy,
+        thread_sandbox: Keyword.get(opts, :thread_sandbox) || config_settings.thread_sandbox,
+        turn_sandbox_policy: Keyword.get(opts, :turn_sandbox_policy) || config_settings.turn_sandbox_policy
+      }}
+    end
   end
 
   defp do_start_session(port, workspace, session_policies) do

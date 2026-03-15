@@ -116,8 +116,13 @@ defmodule SymphonyElixir.AgentRunner do
   defp runtime_session_opts(runtime) do
     [
       command: runtime.command,
+      approval_policy: runtime.approval_policy,
+      thread_sandbox: runtime.thread_sandbox,
+      turn_sandbox_policy: runtime.turn_sandbox_policy,
+      permission_mode: runtime.permission_mode,
       turn_timeout_ms: runtime.turn_timeout_ms,
-      read_timeout_ms: runtime.read_timeout_ms
+      read_timeout_ms: runtime.read_timeout_ms,
+      stall_timeout_ms: runtime.stall_timeout_ms
     ]
   end
 
@@ -212,14 +217,14 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp resolve_backend(opts) do
-    backend_setting = Keyword.get(opts, :backend, Config.settings!().agent.backend)
+    runtime = Keyword.get(opts, :runtime)
 
-    case AgentBackend.resolve(backend_setting) do
-      {:ok, backend} ->
-        {:ok, backend}
+    case runtime do
+      nil ->
+        AgentBackend.resolve_provider("codex")
 
-      {:error, reason} ->
-        {:error, {:invalid_agent_backend, reason}}
+      %{provider: provider} ->
+        AgentBackend.resolve_provider(provider)
     end
   end
 

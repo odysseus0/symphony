@@ -66,7 +66,7 @@ defmodule SymphonyElixir.MultiBackendConcurrencyTest do
     end
   end
 
-  test "agent runner routes command by backend label mapping" do
+  test "agent runner routes to runtime by label" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -77,25 +77,31 @@ defmodule SymphonyElixir.MultiBackendConcurrencyTest do
       workspace_root = Path.join(test_root, "workspaces")
       File.mkdir_p!(workspace_root)
 
-      backend = :claude
-      binary = Path.join(test_root, "routed-#{backend}")
-      trace_file = Path.join(test_root, "trace-#{backend}.log")
-      issue = issue_fixture(backend)
+      binary = Path.join(test_root, "routed-claude")
+      trace_file = Path.join(test_root, "trace-claude.log")
+      issue = issue_fixture(:claude)
 
-      File.write!(binary, fake_backend_script(backend, trace_file))
+      File.write!(binary, fake_backend_script(:claude, trace_file))
       File.chmod!(binary, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command: "missing-default-backend app-server",
-        codex_command_by_label: %{"backend:claude" => "#{binary} app-server"}
+        codex_command: "codex app-server",
+        runtimes: [
+          %{name: "claude-routed", provider: "codex", command: "#{binary} app-server", labels: ["backend:claude"]},
+          %{name: "fallback", provider: "codex", labels: []}
+        ]
       )
+
+      runtime = Config.resolve_runtime_for_issue(issue)
+      assert runtime.name == "claude-routed"
 
       assert :ok =
                AgentRunner.run(
                  issue,
                  nil,
                  max_turns: 1,
+                 runtime: runtime,
                  issue_state_fetcher: fn _issue_ids -> {:ok, []} end
                )
 

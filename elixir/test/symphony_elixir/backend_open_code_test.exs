@@ -55,8 +55,6 @@ defmodule SymphonyElixir.BackendOpenCodeTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_backend: "opencode",
-        codex_opencode_command: "#{opencode_binary} acp",
         codex_opencode_mcp_servers: [%{name: "noop", command: "/usr/bin/true", args: [], env: []}]
       )
 
@@ -72,7 +70,7 @@ defmodule SymphonyElixir.BackendOpenCodeTest do
 
       on_message = fn message -> send(self(), {:open_code_message, message}) end
 
-      assert {:ok, session} = OpenCode.start_session(workspace)
+      assert {:ok, session} = OpenCode.start_session(workspace, command: "#{opencode_binary} acp")
       assert {:ok, result} = OpenCode.run_turn(session, "reply with done", issue, on_message: on_message)
       assert :ok = OpenCode.stop_session(session)
 
@@ -149,9 +147,7 @@ defmodule SymphonyElixir.BackendOpenCodeTest do
       File.chmod!(opencode_binary, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_backend: "opencode",
-        codex_opencode_command: "#{opencode_binary} acp"
+        workspace_root: workspace_root
       )
 
       issue = %Issue{
@@ -164,7 +160,7 @@ defmodule SymphonyElixir.BackendOpenCodeTest do
         labels: ["feature"]
       }
 
-      assert {:ok, session} = OpenCode.start_session(workspace)
+      assert {:ok, session} = OpenCode.start_session(workspace, command: "#{opencode_binary} acp")
       assert {:error, {:port_exit, 1}} = OpenCode.run_turn(session, "trigger crash", issue)
       assert :ok = OpenCode.stop_session(session)
     after
@@ -203,13 +199,11 @@ defmodule SymphonyElixir.BackendOpenCodeTest do
       File.chmod!(opencode_binary, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_backend: "opencode",
-        codex_opencode_command: "#{opencode_binary} acp"
+        workspace_root: workspace_root
       )
 
       assert {:error, {:invalid_session_payload, %{"unexpected" => true}}} =
-               OpenCode.start_session(workspace)
+               OpenCode.start_session(workspace, command: "#{opencode_binary} acp")
     after
       File.rm_rf(test_root)
     end

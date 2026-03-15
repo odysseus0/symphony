@@ -48,6 +48,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:kind, :string)
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
       field(:api_key, :string)
+      field(:team_key, :string)
       field(:project_slug, :string)
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
@@ -62,7 +63,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states,
+        [:kind, :endpoint, :api_key, :team_key, :project_slug, :assignee, :active_states, :terminal_states,
          :workspace_slug, :project_id],
         empty_values: []
       )
@@ -117,7 +118,6 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:backend, :string, default: "codex")
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:context_window_tokens, :integer, default: 400_000)
@@ -130,11 +130,9 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:backend, :max_concurrent_agents, :max_turns, :context_window_tokens, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [:max_concurrent_agents, :max_turns, :context_window_tokens, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
         empty_values: []
       )
-      |> validate_required([:backend])
-      |> validate_length(:backend, min: 1)
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:context_window_tokens, greater_than: 0)
@@ -151,11 +149,8 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:backend, :string, default: "codex")
       field(:command, :string, default: "codex app-server")
-      field(:opencode_command, :string, default: "opencode acp")
       field(:opencode_mcp_servers, {:array, :map}, default: [])
-      field(:command_by_label, :map, default: %{})
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -180,11 +175,8 @@ defmodule SymphonyElixir.Config.Schema do
       |> cast(
         attrs,
         [
-          :backend,
           :command,
-          :opencode_command,
           :opencode_mcp_servers,
-          :command_by_label,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
@@ -195,41 +187,9 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_required([:command])
-      |> validate_command_by_label()
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
-    end
-
-    defp validate_command_by_label(changeset) do
-      validate_change(changeset, :command_by_label, fn :command_by_label, mapping ->
-        Enum.flat_map(mapping, fn {label, command} ->
-          normalized_label =
-            label
-            |> to_string()
-            |> String.trim()
-
-          normalized_command =
-            case command do
-              value when is_binary(value) -> String.trim(value)
-              value -> value
-            end
-
-          cond do
-            normalized_label == "" ->
-              [command_by_label: "contains an empty label key"]
-
-            not is_binary(normalized_command) ->
-              [command_by_label: "must map labels to string commands"]
-
-            normalized_command == "" ->
-              [command_by_label: "contains an empty command"]
-
-            true ->
-              []
-          end
-        end)
-      end)
     end
   end
 
@@ -241,7 +201,8 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:name, :string)
-      field(:command, :string, default: "codex app-server")
+      field(:provider, :string)
+      field(:command, :string)
       field(:labels, {:array, :string}, default: [])
       field(:max_turns, :integer)
 
@@ -257,6 +218,7 @@ defmodule SymphonyElixir.Config.Schema do
 
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
+      field(:permission_mode, :string)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
@@ -269,136 +231,26 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :name,
+          :provider,
           :command,
           :labels,
           :max_turns,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
+          :permission_mode,
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms
         ],
         empty_values: []
       )
-      |> validate_required([:name, :command])
+      |> validate_required([:name, :provider])
+      |> validate_inclusion(:provider, ["codex", "opencode", "claude"])
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
-    end
-  end
-
-  defmodule BackendEntry do
-    @moduledoc false
-    use Ecto.Schema
-    import Ecto.Changeset
-
-    @primary_key false
-    embedded_schema do
-      field(:name, :string)
-      field(:adapter, :string)
-      field(:command, :string)
-      field(:approval_policy, StringOrMap)
-      field(:thread_sandbox, :string)
-      field(:turn_sandbox_policy, :map)
-      field(:turn_timeout_ms, :integer)
-      field(:read_timeout_ms, :integer)
-      field(:stall_timeout_ms, :integer)
-      field(:permission_mode, :string)
-      field(:model, :string)
-      field(:mcp_tools, :boolean)
-    end
-
-    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
-    def changeset(schema, attrs) do
-      schema
-      |> cast(
-        attrs,
-        [
-          :name,
-          :adapter,
-          :command,
-          :approval_policy,
-          :thread_sandbox,
-          :turn_sandbox_policy,
-          :turn_timeout_ms,
-          :read_timeout_ms,
-          :stall_timeout_ms,
-          :permission_mode,
-          :model,
-          :mcp_tools
-        ],
-        empty_values: []
-      )
-      |> validate_required([:name, :command])
-      |> validate_number(:turn_timeout_ms, greater_than: 0)
-      |> validate_number(:read_timeout_ms, greater_than: 0)
-      |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
-    end
-  end
-
-  defmodule Backends do
-    @moduledoc false
-    use Ecto.Schema
-    import Ecto.Changeset
-
-    @primary_key false
-    embedded_schema do
-      field(:default, :string, default: "codex")
-      embeds_many(:entries, BackendEntry, on_replace: :delete)
-    end
-
-    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
-    def changeset(schema, attrs) do
-      schema
-      |> cast(attrs, [:default], empty_values: [])
-      |> validate_required([:default])
-      |> cast_embed(:entries, with: &BackendEntry.changeset/2)
-    end
-  end
-
-  defmodule Routing do
-    @moduledoc false
-    use Ecto.Schema
-    import Ecto.Changeset
-
-    @primary_key false
-    embedded_schema do
-      field(:labels, :map, default: %{})
-      field(:fallback, :string)
-    end
-
-    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
-    def changeset(schema, attrs) do
-      schema
-      |> cast(attrs, [:labels, :fallback], empty_values: [])
-      |> validate_change(:labels, fn :labels, labels ->
-        cond do
-          is_nil(labels) ->
-            []
-
-          not is_map(labels) ->
-            [labels: "must be a map of label to backend name"]
-
-          true ->
-            Enum.flat_map(labels, fn {label, backend_name} ->
-              cond do
-                to_string(label) == "" ->
-                  [labels: "labels must not include blank keys"]
-
-                not is_binary(backend_name) ->
-                  [labels: "routing labels must reference backend names as strings"]
-
-                String.trim(backend_name) == "" ->
-                  [labels: "routing labels must reference non-empty backend names"]
-
-                true ->
-                  []
-              end
-            end)
-        end
-      end)
     end
   end
 
@@ -471,8 +323,6 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_many(:runtimes, Runtime, on_replace: :delete)
-    embeds_one(:backends, Backends, on_replace: :update, defaults_to_struct: true)
-    embeds_one(:routing, Routing, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -482,7 +332,6 @@ defmodule SymphonyElixir.Config.Schema do
   def parse(config) when is_map(config) do
     config
     |> normalize_keys()
-    |> normalize_backends_config()
     |> drop_nil_values()
     |> changeset()
     |> apply_action(:validate)
@@ -518,19 +367,36 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  @spec resolve_runtime_for_issue(%{labels: [String.t()]}, [Runtime.t()]) :: Runtime.t()
+  @spec resolve_runtime_for_issue(%{labels: [String.t()]}, [Runtime.t()]) :: Runtime.t() | nil
   def resolve_runtime_for_issue(issue, runtimes) when is_list(runtimes) do
     issue_labels =
       (Map.get(issue, :labels) || [])
       |> MapSet.new(&String.downcase/1)
 
-    labeled =
-      Enum.find(runtimes, fn rt ->
+    matches =
+      Enum.filter(runtimes, fn rt ->
         rt.labels != [] and
           Enum.any?(rt.labels, fn l -> MapSet.member?(issue_labels, String.downcase(l)) end)
       end)
 
-    labeled || Enum.find(runtimes, fn rt -> rt.labels == [] end) || List.first(runtimes)
+    case matches do
+      [] ->
+        # No label match — find fallback (empty labels)
+        Enum.find(runtimes, fn rt -> rt.labels == [] end)
+
+      [single] ->
+        single
+
+      [first | _rest] ->
+        require Logger
+
+        Logger.warning(
+          "Multiple runtimes matched for issue labels #{inspect(MapSet.to_list(issue_labels))}: " <>
+            "#{inspect(Enum.map(matches, & &1.name))}; using first: #{first.name}"
+        )
+
+        first
+    end
   end
 
   @spec normalize_issue_state(String.t()) :: String.t()
@@ -567,88 +433,26 @@ defmodule SymphonyElixir.Config.Schema do
     end)
   end
 
-  defp normalize_backends_config(config) when is_map(config) do
-    normalized_backends =
-      case Map.get(config, "backends") do
-        %{} = backends ->
-          normalize_backends_section(backends)
+  @doc false
+  @spec validate_unique_labels([Runtime.t()]) :: :ok | {:error, {:duplicate_runtime_labels, [String.t()]}}
+  def validate_unique_labels(runtimes) when is_list(runtimes) do
+    {_seen, duplicates} =
+      Enum.reduce(runtimes, {MapSet.new(), []}, fn rt, {seen, dups} ->
+        Enum.reduce(rt.labels, {seen, dups}, fn label, {s, d} ->
+          normalized = String.downcase(label)
 
-        _ ->
-          legacy_backends_from_codex(Map.get(config, "codex"))
-      end
-
-    Map.put(config, "backends", normalized_backends)
-  end
-
-  defp normalize_backends_section(%{"entries" => entries} = backends) when is_list(entries) do
-    normalized_entries =
-      Enum.map(entries, fn
-        %{} = entry -> entry
-        entry -> %{"name" => to_string(entry), "command" => entry}
+          if MapSet.member?(s, normalized) do
+            {s, [label | d]}
+          else
+            {MapSet.put(s, normalized), d}
+          end
+        end)
       end)
 
-    %{
-      "default" => normalize_optional_string(Map.get(backends, "default")) || "codex",
-      "entries" => normalized_entries
-    }
-  end
-
-  defp normalize_backends_section(backends) do
-    entries =
-      backends
-      |> Enum.reject(fn {name, _attrs} -> to_string(name) == "default" end)
-      |> Enum.map(fn {name, attrs} -> normalize_backend_entry_map(name, attrs) end)
-
-    %{
-      "default" => normalize_optional_string(Map.get(backends, "default")) || "codex",
-      "entries" => entries
-    }
-  end
-
-  defp normalize_backend_entry_map(name, %{} = attrs) do
-    Map.put(attrs, "name", to_string(name))
-  end
-
-  defp normalize_backend_entry_map(name, attrs) do
-    %{"name" => to_string(name), "command" => attrs}
-  end
-
-  defp legacy_backends_from_codex(%{} = codex) do
-    codex_overrides = drop_nil_values(codex)
-
-    codex_entry =
-      default_codex_backend_entry()
-      |> Map.merge(codex_overrides)
-      |> Map.put("name", "codex")
-      |> Map.put_new("adapter", "codex")
-
-    %{"default" => "codex", "entries" => [codex_entry]}
-  end
-
-  defp legacy_backends_from_codex(_other) do
-    codex_entry =
-      default_codex_backend_entry()
-      |> Map.put("name", "codex")
-      |> Map.put_new("adapter", "codex")
-
-    %{"default" => "codex", "entries" => [codex_entry]}
-  end
-
-  defp default_codex_backend_entry do
-    %{
-      "command" => "codex app-server",
-      "approval_policy" => %{
-        "reject" => %{
-          "sandbox_approval" => true,
-          "rules" => true,
-          "mcp_elicitations" => true
-        }
-      },
-      "thread_sandbox" => "workspace-write",
-      "turn_timeout_ms" => 3_600_000,
-      "read_timeout_ms" => 5_000,
-      "stall_timeout_ms" => 300_000
-    }
+    case duplicates do
+      [] -> :ok
+      dups -> {:error, {:duplicate_runtime_labels, Enum.reverse(dups)}}
+    end
   end
 
   defp changeset(attrs) do
@@ -660,12 +464,9 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:runtimes, with: &Runtime.changeset/2)
-    |> cast_embed(:backends, with: &Backends.changeset/2)
-    |> cast_embed(:routing, with: &Routing.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
-    |> validate_backend_references()
   end
 
   defp finalize_settings(settings) do
@@ -697,40 +498,22 @@ defmodule SymphonyElixir.Config.Schema do
       | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
     }
 
-    agent = %{
-      settings.agent
-      | backend: normalize_agent_backend(settings.agent.backend)
-    }
-
-    backends = normalize_backend_entries(settings.backends)
-
-    routing = %{
-      settings.routing
-      | labels: normalize_routing_labels(settings.routing.labels),
-        fallback: normalize_optional_string(settings.routing.fallback)
-    }
-
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
-        command_by_label: normalize_command_by_label(settings.codex.command_by_label),
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
     runtimes = finalize_runtimes(settings.runtimes, codex)
 
-    default_backend_entry =
-      Enum.find(backends.entries, fn backend -> backend.name == backends.default end)
-
-    codex_final = codex_alias_from_backend(codex, default_backend_entry)
-
-    %{settings | tracker: tracker, workspace: workspace, agent: agent, codex: codex_final, runtimes: runtimes, backends: backends, routing: routing}
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, runtimes: runtimes}
   end
 
   defp finalize_runtimes([], codex) do
     [
       %Runtime{
         name: "default",
+        provider: "codex",
         command: codex.command,
         labels: [],
         max_turns: nil,
@@ -744,7 +527,16 @@ defmodule SymphonyElixir.Config.Schema do
     ]
   end
 
-  defp finalize_runtimes(runtimes, _codex) when is_list(runtimes), do: runtimes
+  defp finalize_runtimes(runtimes, _codex) when is_list(runtimes) do
+    Enum.map(runtimes, fn rt ->
+      %{rt | command: rt.command || default_command(rt.provider)}
+    end)
+  end
+
+  defp default_command("codex"), do: "codex app-server"
+  defp default_command("claude"), do: "claude"
+  defp default_command("opencode"), do: "opencode acp"
+  defp default_command(_), do: "codex app-server"
 
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->
@@ -759,196 +551,8 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
   defp normalize_optional_map(value), do: value
 
-  defp normalize_optional_policy(nil), do: nil
-  defp normalize_optional_policy(value) when is_map(value), do: normalize_keys(value)
-  defp normalize_optional_policy(value), do: value
-
-  defp normalize_optional_string(nil), do: nil
-
-  defp normalize_optional_string(value) when is_binary(value) do
-    value
-    |> String.trim()
-    |> case do
-      "" -> nil
-      normalized -> normalized
-    end
-  end
-
-  defp normalize_optional_string(value), do: value |> to_string() |> normalize_optional_string()
-
-  defp normalize_command_by_label(nil), do: %{}
-
-  defp normalize_command_by_label(mapping) when is_map(mapping) do
-    Enum.reduce(mapping, %{}, fn {label, command}, acc ->
-      normalized_label =
-        label
-        |> to_string()
-        |> String.trim()
-        |> String.downcase()
-
-      normalized_command =
-        command
-        |> String.trim()
-
-      if normalized_label == "" do
-        acc
-      else
-        Map.put(acc, normalized_label, normalized_command)
-      end
-    end)
-  end
-
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
-
-  defp normalize_backend_entries(%Backends{} = backends) do
-    entries =
-      Enum.map(backends.entries, fn entry ->
-        %{
-          entry
-          | name: normalize_optional_string(entry.name),
-            adapter: normalize_optional_string(entry.adapter) || normalize_optional_string(entry.name),
-            command: normalize_optional_string(entry.command),
-            approval_policy: normalize_optional_policy(entry.approval_policy),
-            thread_sandbox: normalize_optional_string(entry.thread_sandbox),
-            turn_sandbox_policy: normalize_optional_map(entry.turn_sandbox_policy),
-            permission_mode: normalize_optional_string(entry.permission_mode),
-            model: normalize_optional_string(entry.model)
-        }
-      end)
-
-    %{backends | default: normalize_optional_string(backends.default) || "codex", entries: entries}
-  end
-
-  defp normalize_backend_entries(backends), do: backends
-
-  defp normalize_routing_labels(nil), do: %{}
-
-  defp normalize_routing_labels(labels) when is_map(labels) do
-    labels
-    |> normalize_keys()
-    |> Enum.reduce(%{}, fn {label, backend}, acc ->
-      case normalize_optional_string(backend) do
-        nil -> acc
-        normalized_backend -> Map.put(acc, to_string(label), normalized_backend)
-      end
-    end)
-  end
-
-  defp normalize_routing_labels(_labels), do: %{}
-
-  defp codex_alias_from_backend(codex, nil), do: codex
-
-  defp codex_alias_from_backend(codex, backend) do
-    %{
-      codex
-      | command: backend.command || codex.command,
-        approval_policy: backend.approval_policy || codex.approval_policy,
-        thread_sandbox: backend.thread_sandbox || codex.thread_sandbox,
-        turn_sandbox_policy: backend.turn_sandbox_policy || codex.turn_sandbox_policy,
-        turn_timeout_ms: backend.turn_timeout_ms || codex.turn_timeout_ms,
-        read_timeout_ms: backend.read_timeout_ms || codex.read_timeout_ms,
-        stall_timeout_ms: backend.stall_timeout_ms || codex.stall_timeout_ms
-    }
-  end
-
-  defp validate_backend_references(changeset) do
-    backend_names = backend_names(changeset)
-
-    changeset
-    |> validate_default_backend_reference(backend_names)
-    |> validate_routing_backend_references(backend_names)
-  end
-
-  defp backend_names(changeset) do
-    case get_field(changeset, :backends) do
-      %Backends{entries: entries} ->
-        entries
-        |> Enum.map(fn entry -> normalize_optional_string(entry.name) end)
-        |> Enum.reject(&is_nil/1)
-        |> MapSet.new()
-
-      _ ->
-        MapSet.new()
-    end
-  end
-
-  defp validate_default_backend_reference(changeset, backend_names) do
-    case get_field(changeset, :backends) do
-      %Backends{default: default_backend} ->
-        default_backend = normalize_optional_string(default_backend)
-
-        cond do
-          is_nil(default_backend) ->
-            add_error(changeset, :backends, "backends.default must be a non-empty backend name")
-
-          MapSet.member?(backend_names, default_backend) ->
-            changeset
-
-          true ->
-            add_error(
-              changeset,
-              :backends,
-              "backends.default references unknown backend #{inspect(default_backend)}"
-            )
-        end
-
-      _ ->
-        changeset
-    end
-  end
-
-  defp validate_routing_backend_references(changeset, backend_names) do
-    case get_field(changeset, :routing) do
-      %Routing{} = routing ->
-        changeset
-        |> validate_routing_fallback_reference(routing.fallback, backend_names)
-        |> validate_routing_label_references(routing.labels, backend_names)
-
-      _ ->
-        changeset
-    end
-  end
-
-  defp validate_routing_fallback_reference(changeset, fallback, backend_names) do
-    case normalize_optional_string(fallback) do
-      nil ->
-        changeset
-
-      backend_name ->
-        if MapSet.member?(backend_names, backend_name) do
-          changeset
-        else
-          add_error(
-            changeset,
-            :routing,
-            "routing.fallback references unknown backend #{inspect(backend_name)}"
-          )
-        end
-    end
-  end
-
-  defp validate_routing_label_references(changeset, labels, backend_names) when is_map(labels) do
-    Enum.reduce(labels, changeset, fn {label, backend_name}, acc ->
-      case normalize_optional_string(backend_name) do
-        nil ->
-          acc
-
-        normalized_backend ->
-          if MapSet.member?(backend_names, normalized_backend) do
-            acc
-          else
-            add_error(
-              acc,
-              :routing,
-              "routing.labels.#{label} references unknown backend #{inspect(normalized_backend)}"
-            )
-          end
-      end
-    end)
-  end
-
-  defp validate_routing_label_references(changeset, _labels, _backend_names), do: changeset
 
   defp drop_nil_values(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, nested}, acc ->
@@ -1027,15 +631,6 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_secret_value(_value), do: nil
-
-  defp normalize_agent_backend(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> "codex"
-      trimmed -> trimmed
-    end
-  end
-
-  defp normalize_agent_backend(_value), do: "codex"
 
   defp default_turn_sandbox_policy(workspace) do
     writable_root =

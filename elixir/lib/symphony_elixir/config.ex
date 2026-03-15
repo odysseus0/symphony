@@ -3,7 +3,6 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
-  alias SymphonyElixir.AgentBackend
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Workflow
 
@@ -25,13 +24,6 @@ defmodule SymphonyElixir.Config do
           approval_policy: String.t() | map(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map()
-        }
-
-  @type opencode_runtime_settings :: %{
-          command: String.t(),
-          mcp_servers: [map()],
-          turn_timeout_ms: pos_integer(),
-          read_timeout_ms: pos_integer()
         }
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
@@ -69,7 +61,7 @@ defmodule SymphonyElixir.Config do
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
 
-  @spec resolve_runtime_for_issue(map()) :: Schema.Runtime.t()
+  @spec resolve_runtime_for_issue(map()) :: Schema.Runtime.t() | nil
   def resolve_runtime_for_issue(issue) do
     Schema.resolve_runtime_for_issue(issue, settings!().runtimes)
   end
@@ -82,19 +74,6 @@ defmodule SymphonyElixir.Config do
 
       {:error, reason} ->
         raise ArgumentError, message: "Invalid codex turn sandbox policy: #{inspect(reason)}"
-    end
-  end
-
-  @spec agent_backend() :: String.t()
-  def agent_backend do
-    settings!().agent.backend
-  end
-
-  @spec agent_backend_module() :: module()
-  def agent_backend_module do
-    case AgentBackend.resolve(agent_backend()) do
-      {:ok, module} -> module
-      {:error, reason} -> raise ArgumentError, message: "Unsupported agent backend: #{inspect(reason)}"
     end
   end
 
@@ -139,19 +118,6 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec opencode_runtime_settings() :: {:ok, opencode_runtime_settings()} | {:error, term()}
-  def opencode_runtime_settings do
-    with {:ok, settings} <- settings() do
-      {:ok,
-       %{
-         command: settings.codex.opencode_command,
-         mcp_servers: settings.codex.opencode_mcp_servers,
-         turn_timeout_ms: settings.codex.turn_timeout_ms,
-         read_timeout_ms: settings.codex.read_timeout_ms
-       }}
-    end
-  end
-
   defp validate_semantics(settings) do
     cond do
       is_nil(settings.tracker.kind) ->
@@ -163,8 +129,10 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
+      settings.tracker.kind == "linear" and
+          not is_binary(settings.tracker.team_key) and
+          not is_binary(settings.tracker.project_slug) ->
+        {:error, :missing_linear_team_or_project}
 
       settings.tracker.kind == "plane" and not is_binary(settings.tracker.api_key) ->
         {:error, :missing_plane_api_token}
@@ -176,13 +144,7 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_plane_project_id}
 
       true ->
-        case AgentBackend.resolve(settings.agent.backend) do
-          {:ok, _backend} ->
-            :ok
-
-          {:error, reason} ->
-            {:error, {:unsupported_agent_backend, settings.agent.backend, reason}}
-        end
+        Schema.validate_unique_labels(settings.runtimes)
     end
   end
 

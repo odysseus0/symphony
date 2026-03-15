@@ -46,7 +46,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: nil
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, :missing_linear_team_or_project} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "project",
@@ -880,6 +880,40 @@ defmodule SymphonyElixir.CoreTest do
 
   test "fetch issues by states with empty state set is a no-op" do
     assert {:ok, []} = Client.fetch_issues_by_states([])
+  end
+
+  test "fetch_candidate_issues returns error when both team_key and project_slug are missing" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: nil,
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_linear_team_or_project} = Client.fetch_candidate_issues()
+  end
+
+  test "fetch_issues_by_states returns error when both team_key and project_slug are missing" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: nil,
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_linear_team_or_project} = Client.fetch_issues_by_states(["Todo"])
+  end
+
+  test "fetch_candidate_issues returns error when api_key is missing" do
+    saved = System.get_env("LINEAR_API_KEY")
+    System.delete_env("LINEAR_API_KEY")
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_api_token: nil,
+        tracker_team_key: "ENG"
+      )
+
+      assert {:error, :missing_linear_api_token} = Client.fetch_candidate_issues()
+    after
+      restore_env("LINEAR_API_KEY", saved)
+    end
   end
 
   test "prompt builder renders issue and attempt values from workflow template" do

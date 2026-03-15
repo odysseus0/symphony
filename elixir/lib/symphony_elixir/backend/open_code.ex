@@ -25,11 +25,13 @@ defmodule SymphonyElixir.Backend.OpenCode do
           turn_timeout_ms: pos_integer()
         }
 
+  @default_command "opencode acp"
+
   @impl true
-  @spec start_session(Path.t()) :: {:ok, session()} | {:error, term()}
-  def start_session(workspace) do
+  @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
+  def start_session(workspace, opts \\ []) do
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace),
-         {:ok, settings} <- Config.opencode_runtime_settings(),
+         {:ok, settings} <- opencode_runtime_settings(opts),
          {:ok, runtime_dir} <- write_runtime_config(expanded_workspace, settings.mcp_servers),
          {:ok, port} <- start_port(runtime_dir, settings.command) do
       metadata = port_metadata(port)
@@ -128,6 +130,18 @@ defmodule SymphonyElixir.Backend.OpenCode do
     stop_port(port)
     cleanup_runtime_dir(runtime_dir)
     :ok
+  end
+
+  defp opencode_runtime_settings(opts) do
+    with {:ok, settings} <- Config.settings() do
+      {:ok,
+       %{
+         command: Keyword.get(opts, :command, @default_command),
+         mcp_servers: settings.codex.opencode_mcp_servers,
+         turn_timeout_ms: Keyword.get(opts, :turn_timeout_ms, settings.codex.turn_timeout_ms),
+         read_timeout_ms: Keyword.get(opts, :read_timeout_ms, settings.codex.read_timeout_ms)
+       }}
+    end
   end
 
   defp validate_workspace_cwd(workspace) when is_binary(workspace) do

@@ -1046,8 +1046,21 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt) do
+    case Config.resolve_runtime_for_issue(issue) do
+      nil ->
+        Logger.warning(
+          "No matching runtime for #{issue_context(issue)} labels=#{inspect(issue.labels)}; skipping dispatch"
+        )
+
+        state
+
+      runtime ->
+        do_dispatch_issue_with_runtime(state, issue, attempt, runtime)
+    end
+  end
+
+  defp do_dispatch_issue_with_runtime(%State{} = state, issue, attempt, runtime) do
     recipient = self()
-    runtime = Config.resolve_runtime_for_issue(issue)
     trace_id = new_trace_id()
 
     Logger.info("Selected runtime=#{runtime.name} for #{issue_context(issue)}")

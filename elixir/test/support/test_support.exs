@@ -103,6 +103,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_endpoint: "https://api.linear.app/graphql",
           tracker_api_token: "token",
           tracker_project_slug: "project",
+          tracker_team_key: nil,
           tracker_assignee: nil,
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
@@ -115,18 +116,15 @@ defmodule SymphonyElixir.TestSupport do
           context_window_tokens: 400_000,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
-          agent_backend: :__unset__,
-          codex_backend: "codex",
           codex_command: "codex app-server",
-          codex_opencode_command: "opencode acp",
           codex_opencode_mcp_servers: [],
-          codex_command_by_label: %{},
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          runtimes: nil,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -146,6 +144,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_endpoint = Keyword.get(config, :tracker_endpoint)
     tracker_api_token = Keyword.get(config, :tracker_api_token)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
+    tracker_team_key = Keyword.get(config, :tracker_team_key)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
@@ -158,18 +157,15 @@ defmodule SymphonyElixir.TestSupport do
     context_window_tokens = Keyword.get(config, :context_window_tokens)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
-    agent_backend = Keyword.get(config, :agent_backend)
-    codex_backend = Keyword.get(config, :codex_backend)
     codex_command = Keyword.get(config, :codex_command)
-    codex_opencode_command = Keyword.get(config, :codex_opencode_command)
     codex_opencode_mcp_servers = Keyword.get(config, :codex_opencode_mcp_servers)
-    codex_command_by_label = Keyword.get(config, :codex_command_by_label)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
     codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    runtimes = Keyword.get(config, :runtimes)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -182,12 +178,6 @@ defmodule SymphonyElixir.TestSupport do
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
 
-    agent_backend_line =
-      case agent_backend do
-        :__unset__ -> nil
-        value -> "  backend: #{yaml_value(value)}"
-      end
-
     sections =
       [
         "---",
@@ -195,6 +185,7 @@ defmodule SymphonyElixir.TestSupport do
         "  kind: #{yaml_value(tracker_kind)}",
         "  endpoint: #{yaml_value(tracker_endpoint)}",
         "  api_key: #{yaml_value(tracker_api_token)}",
+        "  team_key: #{yaml_value(tracker_team_key)}",
         "  project_slug: #{yaml_value(tracker_project_slug)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
@@ -211,19 +202,16 @@ defmodule SymphonyElixir.TestSupport do
         "  context_window_tokens: #{yaml_value(context_window_tokens)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
-        agent_backend_line,
         "codex:",
-        "  backend: #{yaml_value(codex_backend)}",
         "  command: #{yaml_value(codex_command)}",
-        "  opencode_command: #{yaml_value(codex_opencode_command)}",
         "  opencode_mcp_servers: #{yaml_value(codex_opencode_mcp_servers)}",
-        "  command_by_label: #{yaml_value(codex_command_by_label)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
         "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        runtimes_yaml(runtimes),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
@@ -256,6 +244,52 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp runtimes_yaml(nil), do: nil
+
+  defp runtimes_yaml(runtimes) when is_list(runtimes) do
+    entries =
+      Enum.map(runtimes, fn rt ->
+        lines = [
+          "  - name: #{yaml_value(rt[:name] || rt["name"])}",
+          "    provider: #{yaml_value(rt[:provider] || rt["provider"])}"
+        ]
+
+        lines =
+          case rt[:command] || rt["command"] do
+            nil -> lines
+            cmd -> lines ++ ["    command: #{yaml_value(cmd)}"]
+          end
+
+        lines =
+          case rt[:labels] || rt["labels"] do
+            nil -> lines
+            labels -> lines ++ ["    labels: #{yaml_value(labels)}"]
+          end
+
+        lines =
+          case rt[:permission_mode] || rt["permission_mode"] do
+            nil -> lines
+            pm -> lines ++ ["    permission_mode: #{yaml_value(pm)}"]
+          end
+
+        lines =
+          case rt[:approval_policy] || rt["approval_policy"] do
+            nil -> lines
+            ap -> lines ++ ["    approval_policy: #{yaml_value(ap)}"]
+          end
+
+        lines =
+          case rt[:thread_sandbox] || rt["thread_sandbox"] do
+            nil -> lines
+            ts -> lines ++ ["    thread_sandbox: #{yaml_value(ts)}"]
+          end
+
+        Enum.join(lines, "\n")
+      end)
+
+    "runtimes:\n" <> Enum.join(entries, "\n")
+  end
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

@@ -2,7 +2,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Config.Schema.{BackendEntry, Codex, Routing, StringOrMap}
+  alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -969,9 +969,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.project_slug == nil
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.agent.max_concurrent_agents == 10
-    assert config.codex.backend == "codex"
     assert config.codex.command == "codex app-server"
-    assert config.codex.opencode_command == "opencode acp"
     assert config.codex.opencode_mcp_servers == []
 
     assert config.codex.approval_policy == %{
@@ -1002,15 +1000,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
     assert Config.settings!().codex.command == "codex app-server --model gpt-5.3-codex"
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      codex_backend: "opencode",
-      codex_opencode_command: "opencode acp --log-level WARN"
-    )
-
-    config = Config.settings!()
-    assert config.codex.backend == "opencode"
-    assert config.codex.opencode_command == "opencode acp --log-level WARN"
 
     explicit_root =
       Path.join(
@@ -1088,8 +1077,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert :ok = Config.validate!()
     assert Config.settings!().codex.thread_sandbox == ""
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_backend: "future-backend")
-    assert {:error, {:unsupported_codex_backend, "future-backend"}} = Config.validate!()
+    write_workflow_file!(Workflow.workflow_file_path(),
+      runtimes: [%{name: "bad", provider: "future-backend", labels: []}]
+    )
+    assert {:error, {:invalid_workflow_config, _}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_sandbox_policy: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1149,14 +1140,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
-  test "config resolves agent backend modules from workflow" do
-    write_workflow_file!(Workflow.workflow_file_path(), codex_backend: "codex")
-    assert Config.agent_backend() == "codex"
-    assert Config.agent_backend_module() == SymphonyElixir.Codex.AppServer
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_backend: "opencode")
-    assert Config.agent_backend() == "opencode"
-    assert Config.agent_backend_module() == SymphonyElixir.Backend.OpenCode
+  test "resolve_provider maps provider strings to backend modules" do
+    assert {:ok, SymphonyElixir.Backend.Codex} = SymphonyElixir.AgentBackend.resolve_provider("codex")
+    assert {:ok, SymphonyElixir.Backend.OpenCode} = SymphonyElixir.AgentBackend.resolve_provider("opencode")
+    assert {:ok, SymphonyElixir.Backend.Claude} = SymphonyElixir.AgentBackend.resolve_provider("claude")
+    assert {:error, {:unknown_provider, "nope"}} = SymphonyElixir.AgentBackend.resolve_provider("nope")
   end
 
   test "config no longer resolves legacy env: references" do
@@ -1288,7 +1276,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
   end
 
-  test "schema parse maps legacy codex config into backends while preserving compatibility alias" do
+  test "schema parse synthesizes default runtime from codex config when no runtimes specified" do
     assert {:ok, settings} =
              Schema.parse(%{
                codex: %{
@@ -1302,113 +1290,88 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                }
              })
 
-    assert settings.backends.default == "codex"
-
-    assert [%BackendEntry{name: "codex"} = codex_backend] = settings.backends.entries
-    assert codex_backend.command == "codex app-server --model gpt-5.3-codex"
-    assert codex_backend.approval_policy == "never"
-    assert codex_backend.thread_sandbox == "danger-full-access"
-    assert codex_backend.turn_sandbox_policy == %{"type" => "dangerFullAccess"}
-    assert codex_backend.turn_timeout_ms == 120_000
-    assert codex_backend.read_timeout_ms == 3_000
-    assert codex_backend.stall_timeout_ms == 60_000
-
-    assert settings.codex.command == codex_backend.command
-    assert settings.codex.approval_policy == codex_backend.approval_policy
-    assert settings.codex.thread_sandbox == codex_backend.thread_sandbox
-    assert settings.codex.turn_sandbox_policy == codex_backend.turn_sandbox_policy
+    assert [default_rt] = settings.runtimes
+    assert default_rt.name == "default"
+    assert default_rt.provider == "codex"
+    assert default_rt.command == "codex app-server --model gpt-5.3-codex"
+    assert default_rt.approval_policy == "never"
+    assert default_rt.thread_sandbox == "danger-full-access"
+    assert default_rt.turn_sandbox_policy == %{"type" => "dangerFullAccess"}
+    assert default_rt.turn_timeout_ms == 120_000
+    assert default_rt.read_timeout_ms == 3_000
+    assert default_rt.stall_timeout_ms == 60_000
   end
 
-  test "schema parse supports multi-backend config and selects backends.default for runtime alias" do
+  test "schema parse supports multi-runtime config with provider-based routing" do
     assert {:ok, settings} =
              Schema.parse(%{
-               backends: %{
-                 default: "claude",
-                 codex: %{
-                   command: "codex app-server",
+               runtimes: [
+                 %{
+                   name: "codex-rt",
+                   provider: "codex",
                    approval_policy: "never",
-                   thread_sandbox: "danger-full-access"
+                   thread_sandbox: "danger-full-access",
+                   labels: ["backend"]
                  },
-                 claude: %{
-                   command: "claude",
+                 %{
+                   name: "claude-rt",
+                   provider: "claude",
                    permission_mode: "bypassPermissions",
-                   model: "opus",
-                   mcp_tools: true
+                   labels: ["complex", "claude"]
                  },
-                 opencode: %{
-                   command: "opencode acp",
-                   model: "gpt-5.3"
+                 %{
+                   name: "fallback",
+                   provider: "codex",
+                   labels: []
                  }
-               },
-               routing: %{
-                 labels: %{"security" => "claude"},
-                 fallback: "codex"
-               }
+               ]
              })
 
-    assert settings.backends.default == "claude"
-    assert Enum.sort(Enum.map(settings.backends.entries, & &1.name)) == ["claude", "codex", "opencode"]
+    assert length(settings.runtimes) == 3
 
-    claude_backend = Enum.find(settings.backends.entries, &(&1.name == "claude"))
-    assert claude_backend.command == "claude"
-    assert claude_backend.permission_mode == "bypassPermissions"
-    assert claude_backend.model == "opus"
-    assert claude_backend.mcp_tools == true
+    claude_rt = Enum.find(settings.runtimes, &(&1.name == "claude-rt"))
+    assert claude_rt.provider == "claude"
+    assert claude_rt.command == "claude"
+    assert claude_rt.permission_mode == "bypassPermissions"
 
-    assert %Routing{labels: %{"security" => "claude"}, fallback: "codex"} = settings.routing
+    codex_rt = Enum.find(settings.runtimes, &(&1.name == "codex-rt"))
+    assert codex_rt.provider == "codex"
+    assert codex_rt.command == "codex app-server"
 
-    # Legacy callers still read settings.codex; it should mirror selected default backend.
-    assert settings.codex.command == "claude"
+    fallback = Enum.find(settings.runtimes, &(&1.name == "fallback"))
+    assert fallback.labels == []
   end
 
-  test "schema parse rejects unknown backend references in default and routing" do
+  test "schema parse rejects invalid provider in runtimes" do
     assert {:error, {:invalid_workflow_config, message}} =
              Schema.parse(%{
-               backends: %{
-                 default: "missing",
-                 codex: %{command: "codex app-server"}
-               }
+               runtimes: [
+                 %{name: "bad", provider: "unknown-backend"}
+               ]
              })
 
-    assert message =~ "backends.default"
-    assert message =~ "missing"
-
-    assert {:error, {:invalid_workflow_config, message}} =
-             Schema.parse(%{
-               backends: %{
-                 default: "codex",
-                 codex: %{command: "codex app-server"}
-               },
-               routing: %{
-                 labels: %{"security" => "claude"},
-                 fallback: "ghost"
-               }
-             })
-
-    assert message =~ "routing"
-    assert message =~ "claude"
-    assert message =~ "ghost"
+    assert message =~ "provider"
   end
 
-  test "config loads backends from WORKFLOW.md and applies backends.default to runtime alias" do
+  test "config loads runtimes from WORKFLOW.md" do
     workflow = """
     ---
     tracker:
       kind: linear
       project_slug: "project"
       api_key: "token"
-    backends:
-      default: claude
-      codex:
-        command: "codex app-server"
-      claude:
-        command: "codex app-server --model claude-proxy"
-        approval_policy: never
-        thread_sandbox: workspace-write
-    routing:
-      fallback: codex
-      labels:
-        security: claude
+    runtimes:
+      - name: codex-rt
+        provider: codex
+        labels: ["backend"]
+      - name: claude-rt
+        provider: claude
+        command: "claude --model opus"
+        labels: ["complex"]
+        permission_mode: bypassPermissions
+      - name: fallback
+        provider: codex
+        labels: []
     ---
     Prompt
     """
@@ -1416,11 +1379,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     File.write!(Workflow.workflow_file_path(), workflow)
 
     config = Config.settings!()
-    assert config.backends.default == "claude"
-    assert Enum.sort(Enum.map(config.backends.entries, & &1.name)) == ["claude", "codex"]
-    assert config.codex.command == "codex app-server --model claude-proxy"
-    assert config.routing.fallback == "codex"
-    assert config.routing.labels == %{"security" => "claude"}
+    assert length(config.runtimes) == 3
+
+    claude_rt = Enum.find(config.runtimes, &(&1.name == "claude-rt"))
+    assert claude_rt.command == "claude --model opus"
+    assert claude_rt.permission_mode == "bypassPermissions"
+
+    fallback = Enum.find(config.runtimes, &(&1.name == "fallback"))
+    assert fallback.provider == "codex"
+    assert fallback.command == "codex app-server"
   end
 
   test "schema resolves sandbox policies from explicit and default workspaces" do
@@ -1568,5 +1535,58 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
     assert Config.workflow_prompt() == workflow_prompt
+  end
+
+  # -- Phase 2: tracker team_key tests --
+
+  test "config parses tracker team_key from WORKFLOW.md" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_team_key: "ENG")
+    config = Config.settings!()
+    assert config.tracker.team_key == "ENG"
+  end
+
+  test "config defaults tracker team_key to nil" do
+    write_workflow_file!(Workflow.workflow_file_path())
+    config = Config.settings!()
+    assert config.tracker.team_key == nil
+  end
+
+  test "validation passes with team_key and no project_slug" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: "ENG",
+      tracker_project_slug: nil
+    )
+
+    assert :ok = Config.validate!()
+  end
+
+  test "validation passes with project_slug and no team_key" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: nil,
+      tracker_project_slug: "my-project"
+    )
+
+    assert :ok = Config.validate!()
+  end
+
+  test "validation fails when both team_key and project_slug are missing for linear" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: nil,
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_linear_team_or_project} = Config.validate!()
+  end
+
+  test "validation passes with both team_key and project_slug (team_key takes priority)" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_team_key: "ENG",
+      tracker_project_slug: "my-project"
+    )
+
+    assert :ok = Config.validate!()
+    config = Config.settings!()
+    assert config.tracker.team_key == "ENG"
+    assert config.tracker.project_slug == "my-project"
   end
 end

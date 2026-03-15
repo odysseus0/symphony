@@ -14,7 +14,7 @@ defmodule SymphonyElixir.Backend.Codex do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace) do
+    with {:ok, session} <- start_session(workspace, opts) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -24,9 +24,9 @@ defmodule SymphonyElixir.Backend.Codex do
   end
 
   @impl true
-  @spec start_session(Path.t()) :: {:ok, session()} | {:error, term()}
-  def start_session(workspace) do
-    AppServer.start_session(workspace)
+  @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
+  def start_session(workspace, opts \\ []) do
+    AppServer.start_session(workspace, opts)
   end
 
   @impl true
