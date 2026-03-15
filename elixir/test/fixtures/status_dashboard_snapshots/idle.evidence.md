@@ -9,8 +9,8 @@
 │ Next refresh: n/a
 ├─ Running
 │
-│   ID       RUNTIME          STAGE          PID      AGE / TURN   TOKENS     SESSION        EVENT                 
-│   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+│   ID       RUNTIME          STAGE          PID      AGE / TURN   TOKENS     CTX%    SESSION        EVENT
+│   ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 │  No active agents
 │
 ├─ Backoff queue

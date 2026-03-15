@@ -15,6 +15,8 @@ defmodule SymphonyElixir.AgentRunner do
   @max_consecutive_empty_turns 3
   @empty_turn_backoff_base_ms 2_000
   @type error_class :: ErrorClassifier.error_class()
+  @context_warning_remaining_ratio 0.35
+  @context_critical_remaining_ratio 0.25
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
@@ -51,6 +53,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp codex_message_handler(recipient, issue, trace_id) do
     fn message ->
+      maybe_track_latest_usage(message)
       send_codex_update(recipient, issue, message, trace_id)
     end
   end
@@ -74,6 +77,7 @@ defmodule SymphonyElixir.AgentRunner do
     runtime = Keyword.get(opts, :runtime)
     default_max_turns = Config.settings!().agent.max_turns
     max_turns = runtime_max_turns(runtime, default_max_turns)
+    context_monitor = init_context_monitor(opts)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
     trace_id = issue_trace_id(issue, opts)
 
@@ -94,7 +98,8 @@ defmodule SymphonyElixir.AgentRunner do
           issue_state_fetcher,
           1,
           max_turns,
-          0
+          0,
+          context_monitor
         )
       after
         backend.stop_session(session)
@@ -126,10 +131,13 @@ defmodule SymphonyElixir.AgentRunner do
          issue_state_fetcher,
          turn_number,
          max_turns,
-         consecutive_empty
+         consecutive_empty,
+         context_monitor
        ) do
     turn_start_ms = System.monotonic_time(:millisecond)
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    prompt_suffix = context_prompt_suffix(context_monitor)
+    Process.put(:agent_runner_latest_usage, nil)
 
     with {:ok, turn_session} <-
            backend.run_turn(
@@ -137,8 +145,19 @@ defmodule SymphonyElixir.AgentRunner do
              prompt,
              issue,
              on_message: codex_message_handler(codex_update_recipient, issue, issue_trace_id(issue, opts)),
-             trace_id: issue_trace_id(issue, opts)
+             trace_id: issue_trace_id(issue, opts),
+             prompt_suffix: prompt_suffix
            ) do
+      turn_session =
+        Map.put(
+          turn_session,
+          :usage,
+          Process.get(:agent_runner_latest_usage)
+        )
+
+      Process.delete(:agent_runner_latest_usage)
+      next_context_monitor = update_context_monitor(context_monitor, turn_session[:usage])
+
       turn_elapsed_ms = System.monotonic_time(:millisecond) - turn_start_ms
       empty_turn? = turn_elapsed_ms < @empty_turn_threshold_ms
 
@@ -173,7 +192,8 @@ defmodule SymphonyElixir.AgentRunner do
               issue_state_fetcher,
               turn_number + 1,
               max_turns,
-              next_consecutive_empty
+              next_consecutive_empty,
+              next_context_monitor
             )
           end
 
@@ -311,6 +331,343 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp maybe_put_logger_metadata(metadata, _key, value) when value in [nil, ""], do: metadata
   defp maybe_put_logger_metadata(metadata, key, value), do: Keyword.put(metadata, key, value)
+
+  defp init_context_monitor(opts) when is_list(opts) do
+    context_window_tokens =
+      opts
+      |> Keyword.get(:context_window_tokens, Config.settings!().agent.context_window_tokens)
+      |> positive_integer_or(400_000)
+
+    warning_remaining_ratio =
+      opts
+      |> Keyword.get(:context_warning_remaining_ratio, @context_warning_remaining_ratio)
+      |> ratio_or(@context_warning_remaining_ratio)
+
+    critical_remaining_ratio =
+      opts
+      |> Keyword.get(:context_critical_remaining_ratio, @context_critical_remaining_ratio)
+      |> ratio_or(@context_critical_remaining_ratio)
+
+    %{
+      context_window_tokens: context_window_tokens,
+      warning_remaining_ratio: warning_remaining_ratio,
+      critical_remaining_ratio: critical_remaining_ratio,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      reported_input_tokens: 0,
+      reported_output_tokens: 0,
+      reported_total_tokens: 0,
+      usage_ratio: 0.0,
+      alert_level: :normal
+    }
+  end
+
+  defp context_prompt_suffix(%{alert_level: :warning} = context_monitor) do
+    """
+    Context budget WARNING:
+
+    - Context used: #{format_usage_percent(context_monitor.usage_ratio)} (#{context_monitor.total_tokens}/#{context_monitor.context_window_tokens} tokens).
+    - Remaining budget is low. Stay concise and avoid broad re-analysis.
+    - Focus only on unresolved acceptance criteria.
+    """
+  end
+
+  defp context_prompt_suffix(%{alert_level: :critical} = context_monitor) do
+    """
+    Context budget CRITICAL:
+
+    - Context used: #{format_usage_percent(context_monitor.usage_ratio)} (#{context_monitor.total_tokens}/#{context_monitor.context_window_tokens} tokens).
+    - Enter convergence mode immediately:
+      1. Finish the current in-flight task only.
+      2. Commit completed changes.
+      3. Update the workpad with final validation evidence.
+      4. Stop and do not start additional tasks.
+    """
+  end
+
+  defp context_prompt_suffix(_context_monitor), do: nil
+
+  defp maybe_track_latest_usage(message) when is_map(message) do
+    case extract_token_usage(message) do
+      usage when is_map(usage) and map_size(usage) > 0 ->
+        Process.put(:agent_runner_latest_usage, usage)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp maybe_track_latest_usage(_message), do: :ok
+
+  defp update_context_monitor(context_monitor, usage) when is_map(context_monitor) do
+    input_progress =
+      compute_token_progress(
+        usage,
+        :input,
+        Map.get(context_monitor, :reported_input_tokens, 0)
+      )
+
+    output_progress =
+      compute_token_progress(
+        usage,
+        :output,
+        Map.get(context_monitor, :reported_output_tokens, 0)
+      )
+
+    total_progress =
+      compute_token_progress(
+        usage,
+        :total,
+        Map.get(context_monitor, :reported_total_tokens, 0)
+      )
+
+    input_tokens = Map.get(context_monitor, :input_tokens, 0) + input_progress.delta
+    output_tokens = Map.get(context_monitor, :output_tokens, 0) + output_progress.delta
+    total_tokens = Map.get(context_monitor, :total_tokens, 0) + total_progress.delta
+
+    context_window_tokens = Map.get(context_monitor, :context_window_tokens, 400_000)
+    usage_ratio = total_tokens / context_window_tokens
+
+    alert_level =
+      context_alert_level(
+        usage_ratio,
+        Map.get(context_monitor, :warning_remaining_ratio, @context_warning_remaining_ratio),
+        Map.get(context_monitor, :critical_remaining_ratio, @context_critical_remaining_ratio)
+      )
+
+    %{
+      context_monitor
+      | input_tokens: input_tokens,
+        output_tokens: output_tokens,
+        total_tokens: total_tokens,
+        reported_input_tokens: input_progress.reported_total,
+        reported_output_tokens: output_progress.reported_total,
+        reported_total_tokens: total_progress.reported_total,
+        usage_ratio: usage_ratio,
+        alert_level: alert_level
+    }
+  end
+
+  defp compute_token_progress(usage, token_kind, previous_total) do
+    reported_total = get_token_usage(usage, token_kind)
+
+    delta =
+      if is_integer(reported_total) and reported_total >= previous_total do
+        reported_total - previous_total
+      else
+        0
+      end
+
+    %{
+      delta: delta,
+      reported_total:
+        if is_integer(reported_total) and reported_total >= 0 do
+          reported_total
+        else
+          previous_total
+        end
+    }
+  end
+
+  defp context_alert_level(usage_ratio, warning_remaining_ratio, critical_remaining_ratio)
+       when is_number(usage_ratio) do
+    remaining_ratio = max(0.0, 1.0 - usage_ratio)
+
+    cond do
+      remaining_ratio <= critical_remaining_ratio -> :critical
+      remaining_ratio <= warning_remaining_ratio -> :warning
+      true -> :normal
+    end
+  end
+
+  defp context_alert_level(_usage_ratio, _warning_remaining_ratio, _critical_remaining_ratio),
+    do: :normal
+
+  defp extract_token_usage(message) when is_map(message) do
+    payloads = [
+      message[:usage],
+      Map.get(message, "usage"),
+      Map.get(message, :usage),
+      message[:payload],
+      Map.get(message, "payload"),
+      Map.get(message, :payload),
+      message
+    ]
+
+    Enum.find_value(payloads, &absolute_token_usage_from_payload/1) ||
+      Enum.find_value(payloads, &turn_completed_usage_from_payload/1) ||
+      %{}
+  end
+
+  defp extract_token_usage(_message), do: %{}
+
+  defp absolute_token_usage_from_payload(payload) when is_map(payload) do
+    absolute_paths = [
+      ["params", "msg", "payload", "info", "total_token_usage"],
+      [:params, :msg, :payload, :info, :total_token_usage],
+      ["params", "msg", "info", "total_token_usage"],
+      [:params, :msg, :info, :total_token_usage],
+      ["params", "tokenUsage", "total"],
+      [:params, :tokenUsage, :total],
+      ["tokenUsage", "total"],
+      [:tokenUsage, :total]
+    ]
+
+    explicit_map_at_paths(payload, absolute_paths)
+  end
+
+  defp absolute_token_usage_from_payload(_payload), do: nil
+
+  defp turn_completed_usage_from_payload(payload) when is_map(payload) do
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+
+    if method in ["turn/completed", :turn_completed] do
+      direct =
+        Map.get(payload, "usage") ||
+          Map.get(payload, :usage) ||
+          map_at_path(payload, ["params", "usage"]) ||
+          map_at_path(payload, [:params, :usage])
+
+      if is_map(direct) and integer_token_map?(direct), do: direct
+    end
+  end
+
+  defp turn_completed_usage_from_payload(_payload), do: nil
+
+  defp explicit_map_at_paths(payload, paths) when is_map(payload) and is_list(paths) do
+    Enum.find_value(paths, fn path ->
+      value = map_at_path(payload, path)
+
+      if is_map(value) and integer_token_map?(value), do: value
+    end)
+  end
+
+  defp explicit_map_at_paths(_payload, _paths), do: nil
+
+  defp map_at_path(payload, path) when is_map(payload) and is_list(path) do
+    Enum.reduce_while(path, payload, fn key, acc ->
+      if is_map(acc) and Map.has_key?(acc, key) do
+        {:cont, Map.get(acc, key)}
+      else
+        {:halt, nil}
+      end
+    end)
+  end
+
+  defp map_at_path(_payload, _path), do: nil
+
+  defp integer_token_map?(payload) do
+    token_fields = [
+      :input_tokens,
+      :output_tokens,
+      :total_tokens,
+      :prompt_tokens,
+      :completion_tokens,
+      :inputTokens,
+      :outputTokens,
+      :totalTokens,
+      :promptTokens,
+      :completionTokens,
+      "input_tokens",
+      "output_tokens",
+      "total_tokens",
+      "prompt_tokens",
+      "completion_tokens",
+      "inputTokens",
+      "outputTokens",
+      "totalTokens",
+      "promptTokens",
+      "completionTokens"
+    ]
+
+    token_fields
+    |> Enum.any?(fn field ->
+      value = map_integer_value(payload, field)
+      !is_nil(value)
+    end)
+  end
+
+  defp get_token_usage(usage, :input),
+    do:
+      payload_get(usage, [
+        "input_tokens",
+        "prompt_tokens",
+        :input_tokens,
+        :prompt_tokens,
+        :input,
+        "promptTokens",
+        :promptTokens,
+        "inputTokens",
+        :inputTokens
+      ])
+
+  defp get_token_usage(usage, :output),
+    do:
+      payload_get(usage, [
+        "output_tokens",
+        "completion_tokens",
+        :output_tokens,
+        :completion_tokens,
+        :output,
+        :completion,
+        "outputTokens",
+        :outputTokens,
+        "completionTokens",
+        :completionTokens
+      ])
+
+  defp get_token_usage(usage, :total),
+    do:
+      payload_get(usage, [
+        "total_tokens",
+        "total",
+        :total_tokens,
+        :total,
+        "totalTokens",
+        :totalTokens
+      ])
+
+  defp payload_get(payload, fields) when is_list(fields) do
+    Enum.find_value(fields, fn field -> map_integer_value(payload, field) end)
+  end
+
+  defp map_integer_value(payload, field) when is_map(payload) do
+    payload
+    |> Map.get(field)
+    |> integer_like()
+  end
+
+  defp map_integer_value(_payload, _field), do: nil
+
+  defp integer_like(value) when is_integer(value) and value >= 0, do: value
+
+  defp integer_like(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {parsed, _rest} when parsed >= 0 -> parsed
+      _ -> nil
+    end
+  end
+
+  defp integer_like(_value), do: nil
+
+  defp positive_integer_or(value, _fallback) when is_integer(value) and value > 0, do: value
+  defp positive_integer_or(_value, fallback), do: fallback
+
+  defp ratio_or(value, _fallback) when is_number(value) and value >= 0 and value <= 1, do: value
+  defp ratio_or(_value, fallback), do: fallback
+
+  defp format_usage_percent(value) when is_number(value) do
+    value
+    |> Kernel.*(100.0)
+    |> Float.round(1)
+    |> :erlang.float_to_binary(decimals: 1)
+    |> Kernel.<>("%")
+  end
+
+  defp format_usage_percent(_value), do: "0.0%"
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"

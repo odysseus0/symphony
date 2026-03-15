@@ -88,6 +88,17 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "config validates context window token settings" do
+    assert Config.settings!().agent.context_window_tokens == 400_000
+
+    write_workflow_file!(Workflow.workflow_file_path(), context_window_tokens: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.context_window_tokens"
+
+    write_workflow_file!(Workflow.workflow_file_path(), context_window_tokens: 250_000)
+    assert Config.settings!().agent.context_window_tokens == 250_000
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
@@ -1855,6 +1866,143 @@ defmodule SymphonyElixir.CoreTest do
                end
              end)
     after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner injects WARNING context guidance on the next continuation turn" do
+    turn_prompts = run_context_monitoring_turn_prompts(70)
+
+    assert length(turn_prompts) == 2
+    assert Enum.at(turn_prompts, 1) =~ "Context budget WARNING:"
+    assert Enum.at(turn_prompts, 1) =~ "Remaining budget is low"
+  end
+
+  test "agent runner injects CRITICAL convergence guidance on the next continuation turn" do
+    turn_prompts = run_context_monitoring_turn_prompts(80)
+
+    assert length(turn_prompts) == 2
+    assert Enum.at(turn_prompts, 1) =~ "Context budget CRITICAL:"
+    assert Enum.at(turn_prompts, 1) =~ "Enter convergence mode immediately"
+    assert Enum.at(turn_prompts, 1) =~ "Update the workpad with final validation evidence"
+  end
+
+  defp run_context_monitoring_turn_prompts(total_tokens) do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-context-monitoring-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(
+        codex_binary,
+        """
+        #!/bin/sh
+        trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+        count=0
+
+        while IFS= read -r line; do
+          count=$((count + 1))
+          printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              ;;
+            3)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-context"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-context-1"}}}'
+              printf '%s\\n' '{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":50,"outputTokens":20,"totalTokens":TOTAL_TOKENS}}}}'
+              printf '%s\\n' '{"method":"turn/completed"}'
+              ;;
+            5)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-context-2"}}}'
+              printf '%s\\n' '{"method":"turn/completed"}'
+              ;;
+          esac
+        done
+        """
+        |> String.replace("TOTAL_TOKENS", Integer.to_string(total_tokens))
+      )
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3,
+        context_window_tokens: 100
+      )
+
+      state_fetcher = fn [_issue_id] ->
+        attempt = Process.get(:context_monitor_fetch_count, 0) + 1
+        Process.put(:context_monitor_fetch_count, attempt)
+
+        state =
+          if attempt == 1 do
+            "In Progress"
+          else
+            "Done"
+          end
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-context-monitoring",
+             identifier: "MT-301",
+             title: "Context monitoring test",
+             description: "Inject warning or critical guidance",
+             state: state
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-context-monitoring",
+        identifier: "MT-301",
+        title: "Context monitoring test",
+        description: "Inject warning or critical guidance",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-301",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+
+      trace_lines = File.read!(trace_file) |> String.split("\n", trim: true)
+
+      trace_lines
+      |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+      |> Enum.map(&String.trim_leading(&1, "JSON:"))
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.filter(&(&1["method"] == "turn/start"))
+      |> Enum.map(fn payload ->
+        get_in(payload, ["params", "input"])
+        |> Enum.map_join("\n", &Map.get(&1, "text", ""))
+      end)
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      Process.delete(:context_monitor_fetch_count)
       File.rm_rf(test_root)
     end
   end

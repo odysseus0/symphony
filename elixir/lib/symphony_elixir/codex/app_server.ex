@@ -92,6 +92,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
     dynamic_tool_opts = dynamic_tool_opts(metadata)
+    turn_prompt = compose_turn_prompt(prompt, opts)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
@@ -99,7 +100,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       end)
 
     with_logger_metadata(metadata, fn ->
-      case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+      case start_turn(port, thread_id, turn_prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
         {:ok, turn_id} ->
           session_id = "#{thread_id}-#{turn_id}"
           Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -1040,6 +1041,26 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp maybe_put_metadata(metadata, key, value), do: Map.put(metadata, key, value)
 
   defp default_on_message(_message), do: :ok
+
+  @doc false
+  @spec compose_turn_prompt_for_test(String.t(), keyword()) :: String.t()
+  def compose_turn_prompt_for_test(prompt, opts \\ []), do: compose_turn_prompt(prompt, opts)
+
+  defp compose_turn_prompt(prompt, opts) when is_binary(prompt) and is_list(opts) do
+    case Keyword.get(opts, :prompt_suffix) do
+      suffix when is_binary(suffix) ->
+        trimmed = String.trim(suffix)
+
+        if trimmed == "" do
+          prompt
+        else
+          prompt <> "\n\n" <> trimmed
+        end
+
+      _ ->
+        prompt
+    end
+  end
 
   defp tool_call_name(params) when is_map(params) do
     case Map.get(params, "tool") || Map.get(params, :tool) || Map.get(params, "name") || Map.get(params, :name) do

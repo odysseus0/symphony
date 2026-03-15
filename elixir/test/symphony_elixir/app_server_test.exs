@@ -224,6 +224,20 @@ defmodule SymphonyElixir.AppServerTest do
     after
       File.rm_rf(test_root)
     end
+
+  test "app server composes turn prompt with optional suffix" do
+    prompt = "Base prompt"
+    suffix = "WARNING: context budget is low."
+
+    assert AppServer.compose_turn_prompt_for_test(prompt, prompt_suffix: suffix) ==
+             "Base prompt\n\nWARNING: context budget is low."
+  end
+
+  test "app server ignores blank prompt suffix values" do
+    prompt = "Base prompt"
+
+    assert AppServer.compose_turn_prompt_for_test(prompt, prompt_suffix: "   ") == prompt
+    assert AppServer.compose_turn_prompt_for_test(prompt, prompt_suffix: nil) == prompt
   end
 
   test "app server passes explicit turn sandbox policies through unchanged" do

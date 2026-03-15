@@ -20,12 +20,15 @@ defmodule SymphonyElixir.StatusDashboard do
   @running_pid_width 8
   @running_age_width 12
   @running_tokens_width 10
+  @running_context_width 7
   @running_session_width 14
   @running_runtime_width 16
   @running_event_default_width 44
   @running_event_min_width 12
   @running_row_chrome_width 11
   @default_terminal_columns 115
+  @context_warning_usage_ratio 0.65
+  @context_critical_usage_ratio 0.75
 
   @ansi_reset IO.ANSI.reset()
   @ansi_bold IO.ANSI.bright()
@@ -779,6 +782,7 @@ defmodule SymphonyElixir.StatusDashboard do
     session = running_entry.session_id |> compact_session_id() |> format_cell(@running_session_width)
     pid = format_cell(running_entry.codex_app_server_pid || "n/a", @running_pid_width)
     total_tokens = running_entry.codex_total_tokens || 0
+    context_usage_percent = context_usage_percent(running_entry)
     runtime_seconds = running_entry.runtime_seconds || 0
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
@@ -791,6 +795,7 @@ defmodule SymphonyElixir.StatusDashboard do
       )
 
     tokens = format_count(total_tokens) |> format_cell(@running_tokens_width, :right)
+    context = format_context_usage(context_usage_percent)
 
     status_color =
       case event do
@@ -800,6 +805,8 @@ defmodule SymphonyElixir.StatusDashboard do
         "turn_completed" -> @ansi_magenta
         _ -> @ansi_blue
       end
+
+    context_color = context_usage_color(context_usage_percent)
 
     [
       "│ ",
@@ -816,6 +823,8 @@ defmodule SymphonyElixir.StatusDashboard do
       colorize(age, @ansi_magenta),
       " ",
       colorize(tokens, @ansi_yellow),
+      " ",
+      colorize(context, context_color),
       " ",
       colorize(session, @ansi_cyan),
       " ",
@@ -949,6 +958,47 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_count(value), do: to_string(value)
 
+  defp context_usage_percent(running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :context_usage_percent) do
+      percent when is_number(percent) and percent >= 0 ->
+        percent
+
+      _ ->
+        context_window_tokens = Config.settings!().agent.context_window_tokens
+        total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+
+        if is_integer(context_window_tokens) and context_window_tokens > 0 and is_integer(total_tokens) and total_tokens >= 0 do
+          total_tokens / context_window_tokens * 100.0
+        end
+    end
+  end
+
+  defp context_usage_percent(_running_entry), do: nil
+
+  defp format_context_usage(percent) when is_number(percent) and percent >= 0 do
+    text =
+      percent
+      |> Float.round(1)
+      |> :erlang.float_to_binary(decimals: 1)
+      |> Kernel.<>("%")
+
+    format_cell(text, @running_context_width, :right)
+  end
+
+  defp format_context_usage(_percent), do: format_cell("n/a", @running_context_width, :right)
+
+  defp context_usage_color(percent) when is_number(percent) and percent >= 0 do
+    usage_ratio = percent / 100.0
+
+    cond do
+      usage_ratio >= @context_critical_usage_ratio -> @ansi_red
+      usage_ratio >= @context_warning_usage_ratio -> @ansi_orange
+      true -> @ansi_green
+    end
+  end
+
+  defp context_usage_color(_percent), do: @ansi_gray
+
   defp running_table_header_row(running_event_width) do
     header =
       [
@@ -958,6 +1008,7 @@ defmodule SymphonyElixir.StatusDashboard do
         format_cell("PID", @running_pid_width),
         format_cell("AGE / TURN", @running_age_width),
         format_cell("TOKENS", @running_tokens_width),
+        format_cell("CTX%", @running_context_width),
         format_cell("SESSION", @running_session_width),
         format_cell("EVENT", running_event_width)
       ]
@@ -974,6 +1025,7 @@ defmodule SymphonyElixir.StatusDashboard do
         @running_pid_width +
         @running_age_width +
         @running_tokens_width +
+        @running_context_width +
         @running_session_width +
         running_event_width + 7
 
@@ -996,6 +1048,7 @@ defmodule SymphonyElixir.StatusDashboard do
       @running_pid_width +
       @running_age_width +
       @running_tokens_width +
+      @running_context_width +
       @running_session_width
   end
 

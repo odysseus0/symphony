@@ -106,6 +106,7 @@ defmodule SymphonyElixir.TestSupport do
           workspace_warning_threshold_bytes: 10 * 1024 * 1024 * 1024,
           max_concurrent_agents: 10,
           max_turns: 20,
+          context_window_tokens: 400_000,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
           agent_backend: :__unset__,
@@ -147,6 +148,7 @@ defmodule SymphonyElixir.TestSupport do
     workspace_warning_threshold_bytes = Keyword.get(config, :workspace_warning_threshold_bytes)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
+    context_window_tokens = Keyword.get(config, :context_window_tokens)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
     agent_backend = Keyword.get(config, :agent_backend)
@@ -198,6 +200,7 @@ defmodule SymphonyElixir.TestSupport do
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
+        "  context_window_tokens: #{yaml_value(context_window_tokens)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
         agent_backend_line,
