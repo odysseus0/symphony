@@ -18,6 +18,7 @@ defmodule SymphonyElixir.AgentBackend do
 
   @spec resolve(term()) :: {:ok, module()} | {:error, term()}
   def resolve("codex"), do: {:ok, SymphonyElixir.Backend.Codex}
+  def resolve("opencode"), do: {:ok, SymphonyElixir.Backend.OpenCode}
 
   def resolve(value) when is_binary(value) do
     trimmed = String.trim(value)
@@ -28,6 +29,9 @@ defmodule SymphonyElixir.AgentBackend do
 
       String.downcase(trimmed) == "codex" ->
         {:ok, SymphonyElixir.Backend.Codex}
+
+      String.downcase(trimmed) == "opencode" ->
+        {:ok, SymphonyElixir.Backend.OpenCode}
 
       true ->
         with {:ok, module} <- module_from_string(trimmed),

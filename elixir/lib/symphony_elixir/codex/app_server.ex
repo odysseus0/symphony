@@ -3,6 +3,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   Minimal client for the Codex app-server JSON-RPC 2.0 stream over stdio.
   """
 
+  @behaviour SymphonyElixir.AgentBackend
+
   require Logger
   alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety}
 

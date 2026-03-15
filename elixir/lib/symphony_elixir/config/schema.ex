@@ -149,7 +149,10 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
+      field(:backend, :string, default: "codex")
       field(:command, :string, default: "codex app-server")
+      field(:opencode_command, :string, default: "opencode acp")
+      field(:opencode_mcp_servers, {:array, :map}, default: [])
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -174,7 +177,10 @@ defmodule SymphonyElixir.Config.Schema do
       |> cast(
         attrs,
         [
+          :backend,
           :command,
+          :opencode_command,
+          :opencode_mcp_servers,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,

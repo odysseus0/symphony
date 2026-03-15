@@ -27,6 +27,13 @@ defmodule SymphonyElixir.Config do
           turn_sandbox_policy: map()
         }
 
+  @type opencode_runtime_settings :: %{
+          command: String.t(),
+          mcp_servers: [map()],
+          turn_timeout_ms: pos_integer(),
+          read_timeout_ms: pos_integer()
+        }
+
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
     case Workflow.current() do
@@ -78,6 +85,19 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec agent_backend() :: String.t()
+  def agent_backend do
+    settings!().agent.backend
+  end
+
+  @spec agent_backend_module() :: module()
+  def agent_backend_module do
+    case AgentBackend.resolve(agent_backend()) do
+      {:ok, module} -> module
+      {:error, reason} -> raise ArgumentError, message: "Unsupported agent backend: #{inspect(reason)}"
+    end
+  end
+
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
     case Workflow.current() do
@@ -116,6 +136,19 @@ defmodule SymphonyElixir.Config do
            turn_sandbox_policy: turn_sandbox_policy
          }}
       end
+    end
+  end
+
+  @spec opencode_runtime_settings() :: {:ok, opencode_runtime_settings()} | {:error, term()}
+  def opencode_runtime_settings do
+    with {:ok, settings} <- settings() do
+      {:ok,
+       %{
+         command: settings.codex.opencode_command,
+         mcp_servers: settings.codex.opencode_mcp_servers,
+         turn_timeout_ms: settings.codex.turn_timeout_ms,
+         read_timeout_ms: settings.codex.read_timeout_ms
+       }}
     end
   end
 

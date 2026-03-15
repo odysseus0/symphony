@@ -109,7 +109,10 @@ defmodule SymphonyElixir.TestSupport do
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
           agent_backend: :__unset__,
+          codex_backend: "codex",
           codex_command: "codex app-server",
+          codex_opencode_command: "opencode acp",
+          codex_opencode_mcp_servers: [],
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
@@ -147,7 +150,10 @@ defmodule SymphonyElixir.TestSupport do
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
     agent_backend = Keyword.get(config, :agent_backend)
+    codex_backend = Keyword.get(config, :codex_backend)
     codex_command = Keyword.get(config, :codex_command)
+    codex_opencode_command = Keyword.get(config, :codex_opencode_command)
+    codex_opencode_mcp_servers = Keyword.get(config, :codex_opencode_mcp_servers)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
     codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
@@ -196,7 +202,10 @@ defmodule SymphonyElixir.TestSupport do
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
         agent_backend_line,
         "codex:",
+        "  backend: #{yaml_value(codex_backend)}",
         "  command: #{yaml_value(codex_command)}",
+        "  opencode_command: #{yaml_value(codex_opencode_command)}",
+        "  opencode_mcp_servers: #{yaml_value(codex_opencode_mcp_servers)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
         "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",

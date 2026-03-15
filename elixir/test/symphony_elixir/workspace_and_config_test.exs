@@ -969,7 +969,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.project_slug == nil
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.agent.max_concurrent_agents == 10
+    assert config.codex.backend == "codex"
     assert config.codex.command == "codex app-server"
+    assert config.codex.opencode_command == "opencode acp"
+    assert config.codex.opencode_mcp_servers == []
 
     assert config.codex.approval_policy == %{
              "reject" => %{
@@ -999,6 +1002,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
     assert Config.settings!().codex.command == "codex app-server --model gpt-5.3-codex"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_backend: "opencode",
+      codex_opencode_command: "opencode acp --log-level WARN"
+    )
+
+    config = Config.settings!()
+    assert config.codex.backend == "opencode"
+    assert config.codex.opencode_command == "opencode acp --log-level WARN"
 
     explicit_root =
       Path.join(
@@ -1076,6 +1088,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert :ok = Config.validate!()
     assert Config.settings!().codex.thread_sandbox == ""
 
+    write_workflow_file!(Workflow.workflow_file_path(), codex_backend: "future-backend")
+    assert {:error, {:unsupported_codex_backend, "future-backend"}} = Config.validate!()
+
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_sandbox_policy: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.turn_sandbox_policy"
@@ -1132,6 +1147,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == api_key
     assert config.workspace.root == Path.expand(workspace_root)
     assert config.codex.command == "#{codex_bin} app-server"
+  end
+
+  test "config resolves agent backend modules from workflow" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_backend: "codex")
+    assert Config.agent_backend() == "codex"
+    assert Config.agent_backend_module() == SymphonyElixir.Codex.AppServer
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_backend: "opencode")
+    assert Config.agent_backend() == "opencode"
+    assert Config.agent_backend_module() == SymphonyElixir.Backend.OpenCode
   end
 
   test "config no longer resolves legacy env: references" do
