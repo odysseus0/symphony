@@ -224,6 +224,7 @@ defmodule SymphonyElixir.AppServerTest do
     after
       File.rm_rf(test_root)
     end
+  end
 
   test "app server composes turn prompt with optional suffix" do
     prompt = "Base prompt"

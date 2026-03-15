@@ -9,9 +9,9 @@
 │ Next refresh: n/a
 ├─ Running
 │
-│   ID       RUNTIME          STAGE          PID      AGE / TURN   TOKENS     CTX%    SESSION        EVENT
-│   ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-638   default          retrying       4242     20m 25s / 7      14,200    3.5% thre...567890  agent message streaming: wait...
+│   ID       RUNTIME          STAGE          PID      AGE / TURN   TOKENS     CTX%    SESSION        EVENT         
+│   ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+│ ● MT-638   default          retrying       4242     20m 25s / 7      14,200    3.5% thre...567890  agent messa...
 │
 ├─ Backoff queue
 │

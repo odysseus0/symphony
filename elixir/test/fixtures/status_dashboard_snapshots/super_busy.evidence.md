@@ -9,10 +9,10 @@
 │ Next refresh: n/a
 ├─ Running
 │
-│   ID       RUNTIME          STAGE          PID      AGE / TURN   TOKENS     CTX%    SESSION        EVENT
-│   ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-101   default          running        4242     13m 5s / 11     120,450   30.1% thre...567890  turn completed (completed)
-│ ● MT-102   default          running        5252     6m 52s / 4       89,200   22.3% thre...567890  mix test --cover
+│   ID       RUNTIME          STAGE          PID      AGE / TURN   TOKENS     CTX%    SESSION        EVENT         
+│   ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+│ ● MT-101   default          running        4242     13m 5s / 11     120,450   30.1% thre...567890  turn comple...
+│ ● MT-102   default          running        5252     6m 52s / 4       89,200   22.3% thre...567890  mix test --...
 │
 ├─ Backoff queue
 │

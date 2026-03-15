@@ -176,6 +176,8 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp execute_sync_workpad(args, opts) do
     with {:ok, issue_id, file_path, comment_id} <- normalize_sync_workpad_args(args),
          {:ok, body} <- read_workpad_file(file_path) do
+      body = append_trace_id_note(body, Keyword.get(opts, :trace_id))
+
       {query, variables} =
         if comment_id,
           do: {@sync_workpad_update, %{"id" => comment_id, "body" => body}},
@@ -186,6 +188,12 @@ defmodule SymphonyElixir.Linear.Adapter do
       {:error, reason} -> failure_response(tool_error_payload(reason))
     end
   end
+
+  defp append_trace_id_note(body, trace_id) when is_binary(trace_id) and trace_id != "" do
+    body <> "\n- trace_id: `#{trace_id}`"
+  end
+
+  defp append_trace_id_note(body, _trace_id), do: body
 
   defp normalize_sync_workpad_args(%{} = args) do
     issue_id = Map.get(args, "issue_id") || Map.get(args, :issue_id)

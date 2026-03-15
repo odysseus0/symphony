@@ -12,7 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_base_delay_ms 5_000
   @continuation_max_delay_ms 300_000
-  @max_continuation_retries 5
+  @max_continuation_retries 2
   @failure_retry_base_ms 10_000
   @human_review_state "Human Review"
   @stats_max_samples 5_000

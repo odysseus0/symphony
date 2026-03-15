@@ -9,9 +9,9 @@
 │ Next refresh: n/a
 ├─ Running
 │
-│   ID       RUNTIME          STAGE          PID      AGE / TURN   TOKENS     CTX%    SESSION        EVENT
-│   ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-777   default          running        4242     1m 15s / 7        3,200    0.8% thre...567890  thread token usage updated (i...
+│   ID       RUNTIME          STAGE          PID      AGE / TURN   TOKENS     CTX%    SESSION        EVENT         
+│   ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+│ ● MT-777   default          running        4242     1m 15s / 7        3,200    0.8% thre...567890  thread toke...
 │
 ├─ Backoff queue
 │

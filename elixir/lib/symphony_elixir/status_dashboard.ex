@@ -25,7 +25,7 @@ defmodule SymphonyElixir.StatusDashboard do
   @running_runtime_width 16
   @running_event_default_width 44
   @running_event_min_width 12
-  @running_row_chrome_width 11
+  @running_row_chrome_width 12
   @default_terminal_columns 115
   @context_warning_usage_ratio 0.65
   @context_critical_usage_ratio 0.75

@@ -77,7 +77,8 @@ defmodule SymphonyElixir.Backend.Claude do
          %{
            result: result,
            session_id: session.session_id,
-           turn_id: turn_id
+           turn_id: turn_id,
+           next_session: %{session | resumed: true}
          }}
 
       {:error, reason} ->
@@ -111,8 +112,7 @@ defmodule SymphonyElixir.Backend.Claude do
     base = [
       "-p", prompt,
       "--output-format", "stream-json",
-      "--permission-mode", session.permission_mode,
-      "--no-session-persistence"
+      "--permission-mode", session.permission_mode
     ]
 
     session_args =

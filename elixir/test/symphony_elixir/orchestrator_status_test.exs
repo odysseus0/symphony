@@ -1248,13 +1248,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     refute Process.alive?(worker_pid)
 
+    current_state = :sys.get_state(pid)
+
     assert %{
              attempt: 1,
              due_at_ms: due_at_ms,
              identifier: "MT-STALL",
              error: "stalled for " <> _,
              error_class: "transient"
-           } = state.retry_attempts[issue_id]
+           } = current_state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)

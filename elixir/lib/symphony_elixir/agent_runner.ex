@@ -13,6 +13,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   @empty_turn_threshold_ms 5_000
   @max_consecutive_empty_turns 3
+  @max_total_empty_turns 5
+  @empty_turn_ratio_window 5
+  @empty_turn_ratio_threshold 0.6
   @empty_turn_backoff_base_ms 2_000
   @type error_class :: ErrorClassifier.error_class()
   @context_warning_remaining_ratio 0.35
@@ -99,6 +102,7 @@ defmodule SymphonyElixir.AgentRunner do
           1,
           max_turns,
           0,
+          0,
           context_monitor
         )
       after
@@ -137,6 +141,7 @@ defmodule SymphonyElixir.AgentRunner do
          turn_number,
          max_turns,
          consecutive_empty,
+         total_empty,
          context_monitor
        ) do
     turn_start_ms = System.monotonic_time(:millisecond)
@@ -161,6 +166,7 @@ defmodule SymphonyElixir.AgentRunner do
         )
 
       Process.delete(:agent_runner_latest_usage)
+      next_app_session = Map.get(turn_session, :next_session, app_session)
       next_context_monitor = update_context_monitor(context_monitor, turn_session[:usage])
 
       turn_elapsed_ms = System.monotonic_time(:millisecond) - turn_start_ms
@@ -171,35 +177,57 @@ defmodule SymphonyElixir.AgentRunner do
       case continue_with_issue?(issue, issue_state_fetcher) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
           next_consecutive_empty = if empty_turn?, do: consecutive_empty + 1, else: 0
+          next_total_empty = if empty_turn?, do: total_empty + 1, else: total_empty
 
-          if next_consecutive_empty >= @max_consecutive_empty_turns do
-            Logger.warning(
-              "Empty turn circuit breaker: #{next_consecutive_empty} consecutive empty turns (<#{@empty_turn_threshold_ms}ms) for #{issue_context(refreshed_issue)}; returning control to orchestrator"
-            )
+          # Sliding window: track recent turns for ratio check
+          recent_window = min(turn_number, @empty_turn_ratio_window)
+          empty_ratio = if recent_window > 0, do: next_consecutive_empty / recent_window, else: 0.0
 
-            :ok
-          else
-            if empty_turn? do
-              backoff_ms = @empty_turn_backoff_base_ms * Bitwise.bsl(1, min(next_consecutive_empty - 1, 4))
-              Logger.info("Empty turn detected for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{max_turns}; backing off #{backoff_ms}ms")
-              Process.sleep(backoff_ms)
-            end
+          cond do
+            next_consecutive_empty >= @max_consecutive_empty_turns ->
+              Logger.warning(
+                "Empty turn circuit breaker: #{next_consecutive_empty} consecutive empty turns (<#{@empty_turn_threshold_ms}ms) for #{issue_context(refreshed_issue)}; returning control to orchestrator"
+              )
 
-            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+              :ok
 
-            do_run_codex_turns(
-              backend,
-              app_session,
-              workspace,
-              refreshed_issue,
-              codex_update_recipient,
-              opts,
-              issue_state_fetcher,
-              turn_number + 1,
-              max_turns,
-              next_consecutive_empty,
-              next_context_monitor
-            )
+            next_total_empty >= @max_total_empty_turns ->
+              Logger.warning(
+                "Empty turn circuit breaker: #{next_total_empty} total empty turns for #{issue_context(refreshed_issue)}; returning control to orchestrator"
+              )
+
+              :ok
+
+            recent_window >= @empty_turn_ratio_window and empty_ratio >= @empty_turn_ratio_threshold ->
+              Logger.warning(
+                "Empty turn circuit breaker: #{Float.round(empty_ratio * 100, 1)}% empty in last #{recent_window} turns for #{issue_context(refreshed_issue)}; returning control to orchestrator"
+              )
+
+              :ok
+
+            true ->
+              if empty_turn? do
+                backoff_ms = @empty_turn_backoff_base_ms * Bitwise.bsl(1, min(next_consecutive_empty - 1, 4))
+                Logger.info("Empty turn detected for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{max_turns}; backing off #{backoff_ms}ms")
+                Process.sleep(backoff_ms)
+              end
+
+              Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+              do_run_codex_turns(
+                backend,
+                next_app_session,
+                workspace,
+                refreshed_issue,
+                codex_update_recipient,
+                opts,
+                issue_state_fetcher,
+                turn_number + 1,
+                max_turns,
+                next_consecutive_empty,
+                next_total_empty,
+                next_context_monitor
+              )
           end
 
         {:continue, refreshed_issue} ->
@@ -228,7 +256,15 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, _max_turns) do
+    attempt = Keyword.get(opts, :attempt)
+
+    if is_integer(attempt) and attempt > 1 do
+      build_continuation_retry_prompt(issue, attempt)
+    else
+      PromptBuilder.build_prompt(issue, opts)
+    end
+  end
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     """
@@ -239,6 +275,19 @@ defmodule SymphonyElixir.AgentRunner do
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+    """
+  end
+
+  defp build_continuation_retry_prompt(issue, attempt) do
+    """
+    Continuation retry (attempt #{attempt}):
+
+    - Issue: #{issue.identifier} — #{issue.title}
+    - The previous session ended, but this issue is still active.
+    - Read the workpad (WORKPAD.md) in the workspace to understand current progress.
+    - Resume from where the previous session left off; do not restart from scratch.
+    - Focus only on remaining acceptance criteria that are not yet marked done.
+    - If truly blocked, update the workpad with the blocker and stop.
     """
   end
 
@@ -492,10 +541,15 @@ defmodule SymphonyElixir.AgentRunner do
     do: :normal
 
   defp extract_token_usage(message) when is_map(message) do
+    # The Codex backend wraps messages via to_standard_event, nesting the original
+    # payload under message[:payload][:payload]. Include that path for extraction.
+    nested_payload = get_in(message, [:payload, :payload])
+
     payloads = [
       message[:usage],
       Map.get(message, "usage"),
       Map.get(message, :usage),
+      nested_payload,
       message[:payload],
       Map.get(message, "payload"),
       Map.get(message, :payload),

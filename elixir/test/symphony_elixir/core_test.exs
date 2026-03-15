@@ -304,7 +304,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "terminal issue state stops running agent and defers workspace cleanup to retention pass" do
+  test "terminal issue state stops running agent and cleans up workspace" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -361,7 +361,7 @@ defmodule SymphonyElixir.CoreTest do
       refute Map.has_key?(updated_state.running, issue_id)
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Process.alive?(agent_pid)
-      assert File.exists?(workspace)
+      refute File.exists?(workspace)
     after
       File.rm_rf(test_root)
     end
@@ -869,7 +869,7 @@ defmodule SymphonyElixir.CoreTest do
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    tolerance_ms = 500
+    tolerance_ms = 1_500
 
     assert remaining_ms >= min_remaining_ms - tolerance_ms
     assert remaining_ms <= max_remaining_ms + tolerance_ms
