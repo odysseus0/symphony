@@ -244,10 +244,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       }
     }
 
-    send_message(port, payload)
-
-    with {:ok, _} <- await_response(port, @initialize_id) do
-      send_message(port, %{"method" => "initialized", "params" => %{}})
+    with :ok <- send_message(port, payload),
+         {:ok, _} <- await_response(port, @initialize_id),
+         :ok <- send_message(port, %{"method" => "initialized", "params" => %{}}) do
       :ok
     end
   end
@@ -259,55 +258,66 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp do_start_session(port, workspace, session_policies) do
     case send_initialize(port) do
       :ok -> start_thread(port, workspace, session_policies)
+      {:error, {:send_failed, reason}} -> {:error, {:port_command_failed, reason}}
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
-    send_message(port, %{
-      "method" => "thread/start",
-      "id" => @thread_start_id,
-      "params" => %{
-        "approvalPolicy" => approval_policy,
-        "sandbox" => thread_sandbox,
-        "cwd" => Path.expand(workspace),
-        "dynamicTools" => DynamicTool.tool_specs()
-      }
-    })
+    with :ok <-
+           send_message(port, %{
+             "method" => "thread/start",
+             "id" => @thread_start_id,
+             "params" => %{
+               "approvalPolicy" => approval_policy,
+               "sandbox" => thread_sandbox,
+               "cwd" => Path.expand(workspace),
+               "dynamicTools" => DynamicTool.tool_specs()
+             }
+           }),
+         {:ok, response} <- await_response(port, @thread_start_id) do
+      case response do
+        %{"thread" => thread_payload} ->
+          case thread_payload do
+            %{"id" => thread_id} -> {:ok, thread_id}
+            _ -> {:error, {:invalid_thread_payload, thread_payload}}
+          end
 
-    case await_response(port, @thread_start_id) do
-      {:ok, %{"thread" => thread_payload}} ->
-        case thread_payload do
-          %{"id" => thread_id} -> {:ok, thread_id}
-          _ -> {:error, {:invalid_thread_payload, thread_payload}}
-        end
-
-      other ->
-        other
+        other ->
+          {:error, {:invalid_thread_response, other}}
+      end
+    else
+      {:error, {:send_failed, reason}} -> {:error, {:port_command_failed, reason}}
+      other -> other
     end
   end
 
   defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
-    send_message(port, %{
-      "method" => "turn/start",
-      "id" => @turn_start_id,
-      "params" => %{
-        "threadId" => thread_id,
-        "input" => [
-          %{
-            "type" => "text",
-            "text" => prompt
-          }
-        ],
-        "cwd" => Path.expand(workspace),
-        "title" => "#{issue.identifier}: #{issue.title}",
-        "approvalPolicy" => approval_policy,
-        "sandboxPolicy" => turn_sandbox_policy
-      }
-    })
-
-    case await_response(port, @turn_start_id) do
-      {:ok, %{"turn" => %{"id" => turn_id}}} -> {:ok, turn_id}
+    with :ok <-
+           send_message(port, %{
+             "method" => "turn/start",
+             "id" => @turn_start_id,
+             "params" => %{
+               "threadId" => thread_id,
+               "input" => [
+                 %{
+                   "type" => "text",
+                   "text" => prompt
+                 }
+               ],
+               "cwd" => Path.expand(workspace),
+               "title" => "#{issue.identifier}: #{issue.title}",
+               "approvalPolicy" => approval_policy,
+               "sandboxPolicy" => turn_sandbox_policy
+             }
+           }),
+         {:ok, response} <- await_response(port, @turn_start_id) do
+      case response do
+        %{"turn" => %{"id" => turn_id}} -> {:ok, turn_id}
+        other -> {:error, {:invalid_turn_start_response, other}}
+      end
+    else
+      {:error, {:send_failed, reason}} -> {:error, {:port_command_failed, reason}}
       other -> other
     end
   end
@@ -1085,7 +1095,14 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp send_message(port, message) do
     line = Jason.encode!(message) <> "\n"
-    Port.command(port, line)
+
+    try do
+      Port.command(port, line)
+      :ok
+    rescue
+      ArgumentError ->
+        {:error, {:send_failed, :port_closed}}
+    end
   end
 
   defp needs_input?(method, payload)

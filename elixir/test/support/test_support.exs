@@ -71,21 +71,27 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
-           {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
-           _child -> false
-         end) do
-      {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
-        :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+    case Process.whereis(SymphonyElixir.Supervisor) do
+      nil ->
+        :ok
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
+      _pid ->
+        case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+               {SymphonyElixir.HttpServer, _child_pid, _type, _modules} -> true
+               _child -> false
+             end) do
+          {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
+            :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+
+            if Process.alive?(pid) do
+              Process.exit(pid, :normal)
+            end
+
+            :ok
+
+          _ ->
+            :ok
         end
-
-        :ok
-
-      _ ->
-        :ok
     end
   end
 
@@ -114,6 +120,7 @@ defmodule SymphonyElixir.TestSupport do
           codex_command: "codex app-server",
           codex_opencode_command: "opencode acp",
           codex_opencode_mcp_servers: [],
+          codex_command_by_label: %{},
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
@@ -156,6 +163,7 @@ defmodule SymphonyElixir.TestSupport do
     codex_command = Keyword.get(config, :codex_command)
     codex_opencode_command = Keyword.get(config, :codex_opencode_command)
     codex_opencode_mcp_servers = Keyword.get(config, :codex_opencode_mcp_servers)
+    codex_command_by_label = Keyword.get(config, :codex_command_by_label)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
     codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
@@ -209,6 +217,7 @@ defmodule SymphonyElixir.TestSupport do
         "  command: #{yaml_value(codex_command)}",
         "  opencode_command: #{yaml_value(codex_opencode_command)}",
         "  opencode_mcp_servers: #{yaml_value(codex_opencode_mcp_servers)}",
+        "  command_by_label: #{yaml_value(codex_command_by_label)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
         "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",

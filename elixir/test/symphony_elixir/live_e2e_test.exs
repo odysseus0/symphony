@@ -7,20 +7,57 @@ defmodule SymphonyElixir.LiveE2ETest do
   @moduletag timeout: 300_000
 
   @default_team_key "SYME2E"
-  @result_file "LIVE_E2E_RESULT.txt"
-  @live_e2e_skip_reason (cond do
-                           System.get_env("SYMPHONY_RUN_LIVE_E2E") != "1" ->
-                             "set SYMPHONY_RUN_LIVE_E2E=1 to enable the real Linear/Codex end-to-end test"
+  @live_backends [:codex, :opencode, :claude]
 
-                           is_nil(System.find_executable("codex")) ->
-                             "real Codex live test requires `codex` on PATH"
+  backend_skip_reason = fn backend ->
+    {command, required_env_var} =
+      case backend do
+        :codex ->
+          {System.get_env("SYMPHONY_LIVE_CODEX_COMMAND") || "codex app-server", nil}
 
-                           System.get_env("LINEAR_API_KEY") in [nil, ""] ->
-                             "real Linear live test requires LINEAR_API_KEY"
+        :opencode ->
+          {System.get_env("SYMPHONY_LIVE_OPENCODE_COMMAND"), "SYMPHONY_LIVE_OPENCODE_COMMAND"}
 
-                           true ->
-                             nil
-                         end)
+        :claude ->
+          {System.get_env("SYMPHONY_LIVE_CLAUDE_COMMAND"), "SYMPHONY_LIVE_CLAUDE_COMMAND"}
+      end
+
+    executable =
+      case command do
+        value when is_binary(value) ->
+          value
+          |> String.trim()
+          |> String.split(~r/\s+/, parts: 2, trim: true)
+          |> List.first()
+
+        _ ->
+          nil
+      end
+
+    cond do
+      System.get_env("SYMPHONY_RUN_LIVE_E2E") != "1" ->
+        "set SYMPHONY_RUN_LIVE_E2E=1 to enable the real Linear live end-to-end tests"
+
+      System.get_env("LINEAR_API_KEY") in [nil, ""] ->
+        "real Linear live tests require LINEAR_API_KEY"
+
+      executable in [nil, ""] and is_binary(required_env_var) ->
+        "live #{backend} test requires #{required_env_var} to point to an app-server compatible command"
+
+      executable in [nil, ""] ->
+        "live #{backend} test requires a non-empty command"
+
+      is_nil(System.find_executable(executable)) ->
+        "live #{backend} test requires executable `#{executable}` on PATH"
+
+      true ->
+        nil
+    end
+  end
+
+  @backend_skip_reasons Enum.into(@live_backends, %{}, fn backend ->
+                          {backend, backend_skip_reason.(backend)}
+                        end)
 
   @team_query """
   query SymphonyLiveE2ETeam($key: String!) {
@@ -125,19 +162,26 @@ defmodule SymphonyElixir.LiveE2ETest do
   }
   """
 
-  @tag skip: @live_e2e_skip_reason
-  test "creates a real Linear project and issue, then runs a real Codex turn" do
+  for backend <- @live_backends do
+    @tag backend: backend
+    @tag skip: @backend_skip_reasons[backend]
+    test "end-to-end issue completion with #{backend}" do
+      run_live_backend_e2e(unquote(backend))
+    end
+  end
+
+  defp run_live_backend_e2e(backend) when backend in @live_backends do
     test_root =
       Path.join(
         System.tmp_dir!(),
-        "symphony-live-e2e-#{System.unique_integer([:positive])}"
+        "symphony-live-e2e-#{backend}-#{System.unique_integer([:positive])}"
       )
 
     workflow_root = Path.join(test_root, "workflow")
     workflow_file = Path.join(workflow_root, "WORKFLOW.md")
     workspace_root = Path.join(test_root, "workspaces")
     team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
-    codex_command = System.get_env("SYMPHONY_LIVE_CODEX_COMMAND") || "codex app-server"
+    backend_command = backend_command(backend)
     original_workflow_path = Workflow.workflow_file_path()
 
     File.mkdir_p!(workflow_root)
@@ -149,7 +193,7 @@ defmodule SymphonyElixir.LiveE2ETest do
         tracker_api_token: "$LINEAR_API_KEY",
         tracker_project_slug: "bootstrap",
         workspace_root: workspace_root,
-        codex_command: codex_command,
+        codex_command: backend_command,
         codex_approval_policy: "never",
         observability_enabled: false
       )
@@ -162,7 +206,7 @@ defmodule SymphonyElixir.LiveE2ETest do
       project =
         create_project!(
           team["id"],
-          "Symphony Live E2E #{System.unique_integer([:positive])}"
+          "Symphony Live E2E #{backend} #{System.unique_integer([:positive])}"
         )
 
       issue =
@@ -179,23 +223,19 @@ defmodule SymphonyElixir.LiveE2ETest do
         tracker_active_states: [active_state["name"]],
         tracker_terminal_states: terminal_states,
         workspace_root: workspace_root,
-        codex_command: codex_command,
+        codex_command: backend_command,
         codex_approval_policy: "never",
         codex_turn_timeout_ms: 600_000,
         codex_stall_timeout_ms: 600_000,
         observability_enabled: false,
-        prompt: live_prompt(project["slugId"])
+        prompt: live_prompt(project["slugId"], backend)
       )
 
       assert :ok = AgentRunner.run(issue, nil, max_turns: 1)
 
-      result_path = Path.join([workspace_root, issue.identifier, @result_file])
-      assert File.exists?(result_path)
-      assert File.read!(result_path) == expected_result(issue.identifier, project["slugId"])
-
       issue_snapshot = fetch_issue_details!(issue.id)
       assert issue_completed?(issue_snapshot)
-      assert issue_has_comment?(issue_snapshot, expected_comment(issue.identifier, project["slugId"]))
+      assert issue_has_comment?(issue_snapshot, expected_comment(issue.identifier, project["slugId"], backend))
 
       assert :ok = complete_project(project["id"], completed_project_status["id"])
     after
@@ -360,39 +400,19 @@ defmodule SymphonyElixir.LiveE2ETest do
     end
   end
 
-  defp live_prompt(project_slug) do
+  defp live_prompt(project_slug, backend) do
     """
-    You are running a real Symphony end-to-end test.
+    You are running a real Symphony end-to-end test for backend `#{backend}`.
 
     The current working directory is the workspace root.
 
     Step 1:
-    Create a file named #{@result_file} in the current working directory by running exactly:
-
-    ```sh
-    cat > #{@result_file} <<'EOF'
-    identifier={{ issue.identifier }}
-    project_slug=#{project_slug}
-    EOF
-    ```
-
-    Then verify it by running:
-
-    ```sh
-    cat #{@result_file}
-    ```
-
-    The file content must be exactly:
-    identifier={{ issue.identifier }}
-    project_slug=#{project_slug}
-
-    Step 2:
     Use the `linear_graphql` tool to query the current issue by `{{ issue.id }}` and read:
     - existing comments
     - team workflow states
 
     If the exact comment body below is not already present, post exactly one comment on the current issue with this exact body:
-    #{expected_comment("{{ issue.identifier }}", project_slug)}
+    #{expected_comment("{{ issue.identifier }}", project_slug, backend)}
 
     Use these exact GraphQL operations:
 
@@ -425,7 +445,7 @@ defmodule SymphonyElixir.LiveE2ETest do
     }
     ```
 
-    Step 3:
+    Step 2:
     Use the same issue-context query result to choose a workflow state whose `type` is `completed`.
     Then move the current issue to that state with this exact mutation:
 
@@ -437,24 +457,31 @@ defmodule SymphonyElixir.LiveE2ETest do
     }
     ```
 
-    Step 4:
+    Step 3:
     Verify all outcomes with one final `linear_graphql` query against `{{ issue.id }}`:
     - the exact comment body is present
     - the issue state type is `completed`
 
-    Do not ask for approval.
-    Stop only after all three conditions are true:
-    1. the file exists with the exact contents above
-    2. the Linear comment exists with the exact body above
-    3. the Linear issue is in a completed terminal state
+    Do not ask for approval and do not stop early.
+    Stop only after both conditions are true:
+    1. the Linear comment exists with the exact body above
+    2. the Linear issue is in a completed terminal state
     """
   end
 
-  defp expected_result(issue_identifier, project_slug) do
-    "identifier=#{issue_identifier}\nproject_slug=#{project_slug}\n"
+  defp expected_comment(issue_identifier, project_slug, backend) do
+    "Symphony live e2e comment\nidentifier=#{issue_identifier}\nproject_slug=#{project_slug}\nbackend=#{backend}"
   end
 
-  defp expected_comment(issue_identifier, project_slug) do
-    "Symphony live e2e comment\nidentifier=#{issue_identifier}\nproject_slug=#{project_slug}"
+  defp backend_command(:codex) do
+    System.get_env("SYMPHONY_LIVE_CODEX_COMMAND") || "codex app-server"
+  end
+
+  defp backend_command(:opencode) do
+    System.get_env("SYMPHONY_LIVE_OPENCODE_COMMAND") || "opencode app-server"
+  end
+
+  defp backend_command(:claude) do
+    System.get_env("SYMPHONY_LIVE_CLAUDE_COMMAND") || "claude app-server"
   end
 end

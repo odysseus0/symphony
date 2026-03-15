@@ -20,6 +20,12 @@ Symphony polls a Linear project for active tickets. Each ticket gets an isolated
 
 The state machine lives in `WORKFLOW.md` — a markdown file with YAML frontmatter for config and a prompt body that defines agent behavior. Hot-reloads in under a second, no restart needed.
 
+## Multi-backend references
+
+- [Multi-backend architecture](docs/multi-backend-architecture.md)
+- [Backend configuration guide](docs/backend-configuration.md)
+- [Backend operations guide](docs/backend-operations.md)
+
 ## What's different from upstream
 
 - **Cheaper Linear calls** — agents no longer burn tokens on schema introspection before every GraphQL call, and workpad sync is a single dynamic tool instead of a hand-rolled mutation

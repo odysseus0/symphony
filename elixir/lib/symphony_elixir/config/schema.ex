@@ -155,6 +155,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:command, :string, default: "codex app-server")
       field(:opencode_command, :string, default: "opencode acp")
       field(:opencode_mcp_servers, {:array, :map}, default: [])
+      field(:command_by_label, :map, default: %{})
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -183,6 +184,7 @@ defmodule SymphonyElixir.Config.Schema do
           :command,
           :opencode_command,
           :opencode_mcp_servers,
+          :command_by_label,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
@@ -193,9 +195,41 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_required([:command])
+      |> validate_command_by_label()
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+
+    defp validate_command_by_label(changeset) do
+      validate_change(changeset, :command_by_label, fn :command_by_label, mapping ->
+        Enum.flat_map(mapping, fn {label, command} ->
+          normalized_label =
+            label
+            |> to_string()
+            |> String.trim()
+
+          normalized_command =
+            case command do
+              value when is_binary(value) -> String.trim(value)
+              value -> value
+            end
+
+          cond do
+            normalized_label == "" ->
+              [command_by_label: "contains an empty label key"]
+
+            not is_binary(normalized_command) ->
+              [command_by_label: "must map labels to string commands"]
+
+            normalized_command == "" ->
+              [command_by_label: "contains an empty command"]
+
+            true ->
+              []
+          end
+        end)
+      end)
     end
   end
 
@@ -679,6 +713,7 @@ defmodule SymphonyElixir.Config.Schema do
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
+        command_by_label: normalize_command_by_label(settings.codex.command_by_label),
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
@@ -740,6 +775,28 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_optional_string(value), do: value |> to_string() |> normalize_optional_string()
+
+  defp normalize_command_by_label(nil), do: %{}
+
+  defp normalize_command_by_label(mapping) when is_map(mapping) do
+    Enum.reduce(mapping, %{}, fn {label, command}, acc ->
+      normalized_label =
+        label
+        |> to_string()
+        |> String.trim()
+        |> String.downcase()
+
+      normalized_command =
+        command
+        |> String.trim()
+
+      if normalized_label == "" do
+        acc
+      else
+        Map.put(acc, normalized_label, normalized_command)
+      end
+    end)
+  end
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
