@@ -2,7 +2,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
+  alias SymphonyElixir.Config.Schema.{BackendEntry, Codex, Routing, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -1154,6 +1154,141 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert settings.tracker.api_key == "fallback-linear-token"
     assert settings.workspace.root == Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))
+  end
+
+  test "schema parse maps legacy codex config into backends while preserving compatibility alias" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               codex: %{
+                 command: "codex app-server --model gpt-5.3-codex",
+                 approval_policy: "never",
+                 thread_sandbox: "danger-full-access",
+                 turn_sandbox_policy: %{type: "dangerFullAccess"},
+                 turn_timeout_ms: 120_000,
+                 read_timeout_ms: 3_000,
+                 stall_timeout_ms: 60_000
+               }
+             })
+
+    assert settings.backends.default == "codex"
+
+    assert [%BackendEntry{name: "codex"} = codex_backend] = settings.backends.entries
+    assert codex_backend.command == "codex app-server --model gpt-5.3-codex"
+    assert codex_backend.approval_policy == "never"
+    assert codex_backend.thread_sandbox == "danger-full-access"
+    assert codex_backend.turn_sandbox_policy == %{"type" => "dangerFullAccess"}
+    assert codex_backend.turn_timeout_ms == 120_000
+    assert codex_backend.read_timeout_ms == 3_000
+    assert codex_backend.stall_timeout_ms == 60_000
+
+    assert settings.codex.command == codex_backend.command
+    assert settings.codex.approval_policy == codex_backend.approval_policy
+    assert settings.codex.thread_sandbox == codex_backend.thread_sandbox
+    assert settings.codex.turn_sandbox_policy == codex_backend.turn_sandbox_policy
+  end
+
+  test "schema parse supports multi-backend config and selects backends.default for runtime alias" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               backends: %{
+                 default: "claude",
+                 codex: %{
+                   command: "codex app-server",
+                   approval_policy: "never",
+                   thread_sandbox: "danger-full-access"
+                 },
+                 claude: %{
+                   command: "claude",
+                   permission_mode: "bypassPermissions",
+                   model: "opus",
+                   mcp_tools: true
+                 },
+                 opencode: %{
+                   command: "opencode acp",
+                   model: "gpt-5.3"
+                 }
+               },
+               routing: %{
+                 labels: %{"security" => "claude"},
+                 fallback: "codex"
+               }
+             })
+
+    assert settings.backends.default == "claude"
+    assert Enum.sort(Enum.map(settings.backends.entries, & &1.name)) == ["claude", "codex", "opencode"]
+
+    claude_backend = Enum.find(settings.backends.entries, &(&1.name == "claude"))
+    assert claude_backend.command == "claude"
+    assert claude_backend.permission_mode == "bypassPermissions"
+    assert claude_backend.model == "opus"
+    assert claude_backend.mcp_tools == true
+
+    assert %Routing{labels: %{"security" => "claude"}, fallback: "codex"} = settings.routing
+
+    # Legacy callers still read settings.codex; it should mirror selected default backend.
+    assert settings.codex.command == "claude"
+  end
+
+  test "schema parse rejects unknown backend references in default and routing" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               backends: %{
+                 default: "missing",
+                 codex: %{command: "codex app-server"}
+               }
+             })
+
+    assert message =~ "backends.default"
+    assert message =~ "missing"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               backends: %{
+                 default: "codex",
+                 codex: %{command: "codex app-server"}
+               },
+               routing: %{
+                 labels: %{"security" => "claude"},
+                 fallback: "ghost"
+               }
+             })
+
+    assert message =~ "routing"
+    assert message =~ "claude"
+    assert message =~ "ghost"
+  end
+
+  test "config loads backends from WORKFLOW.md and applies backends.default to runtime alias" do
+    workflow = """
+    ---
+    tracker:
+      kind: linear
+      project_slug: "project"
+      api_key: "token"
+    backends:
+      default: claude
+      codex:
+        command: "codex app-server"
+      claude:
+        command: "codex app-server --model claude-proxy"
+        approval_policy: never
+        thread_sandbox: workspace-write
+    routing:
+      fallback: codex
+      labels:
+        security: claude
+    ---
+    Prompt
+    """
+
+    File.write!(Workflow.workflow_file_path(), workflow)
+
+    config = Config.settings!()
+    assert config.backends.default == "claude"
+    assert Enum.sort(Enum.map(config.backends.entries, & &1.name)) == ["claude", "codex"]
+    assert config.codex.command == "codex app-server --model claude-proxy"
+    assert config.routing.fallback == "codex"
+    assert config.routing.labels == %{"security" => "claude"}
   end
 
   test "schema resolves sandbox policies from explicit and default workspaces" do

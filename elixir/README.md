@@ -98,8 +98,10 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
-codex:
-  command: codex app-server
+backends:
+  default: codex
+  codex:
+    command: codex app-server
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -110,15 +112,22 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
-- Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
-  - `codex.thread_sandbox` defaults to `workspace-write`
-  - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
-- Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
-  unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
+- `backends` is the primary runtime config. `codex` remains a backward-compatible alias and is
+  auto-mapped to:
+  - `backends.default: codex`
+  - `backends.codex: <legacy codex settings>`
+- Safer defaults are used when policy fields are omitted for the selected default backend:
+  - `approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
+  - `thread_sandbox` defaults to `workspace-write`
+  - `turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+- Supported `approval_policy` values depend on the targeted Codex app-server version. In the
+  current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and
+  `never`, and object-form `reject` is also supported.
+- Supported `thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
+- When `turn_sandbox_policy` is set explicitly, Symphony passes the map through unchanged.
+  Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
+- `routing` is optional in the schema and reserved for backend routing policy.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
@@ -130,8 +139,24 @@ Notes:
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
-  while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
-  launched shell.
+  while `backends.<name>.command` stays a shell command string and any `$VAR` expansion there
+  happens in the launched shell.
+
+Migration (`codex` -> `backends`) example:
+
+```yaml
+# before
+codex:
+  command: codex app-server
+  approval_policy: never
+
+# after
+backends:
+  default: codex
+  codex:
+    command: codex app-server
+    approval_policy: never
+```
 
 ```yaml
 tracker:
@@ -141,8 +166,10 @@ workspace:
 hooks:
   after_create: |
     git clone --depth 1 "$SOURCE_REPO_URL" .
-codex:
-  command: "$CODEX_BIN app-server --model gpt-5.3-codex"
+backends:
+  default: codex
+  codex:
+    command: "$CODEX_BIN app-server --model gpt-5.3-codex"
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
