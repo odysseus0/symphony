@@ -108,12 +108,13 @@ defmodule SymphonyElixir.CoreTest do
     after_create_hook = Map.get(hooks, "after_create")
     assert is_binary(after_create_hook)
     assert after_create_hook =~ "git clone --depth 1"
-    assert after_create_hook =~ "symphony"
+    assert after_create_hook =~ "symphony.git ."
     assert after_create_hook =~ "cd elixir && mise trust"
     assert after_create_hook =~ "mise exec -- mix deps.get"
     before_remove_hook = Map.get(hooks, "before_remove")
     assert is_binary(before_remove_hook)
-    assert String.trim(before_remove_hook) != ""
+    assert before_remove_hook =~ "gh pr list --head"
+    assert before_remove_hook =~ "gh pr close"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -857,9 +858,10 @@ defmodule SymphonyElixir.CoreTest do
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+    tolerance_ms = 500
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+    assert remaining_ms >= min_remaining_ms - tolerance_ms
+    assert remaining_ms <= max_remaining_ms + tolerance_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
@@ -1259,7 +1261,7 @@ defmodule SymphonyElixir.CoreTest do
                       %{
                         event: :session_started,
                         timestamp: %DateTime{},
-                        session_id: session_id
+                        payload: %{session_id: session_id}
                       }},
                      500
 

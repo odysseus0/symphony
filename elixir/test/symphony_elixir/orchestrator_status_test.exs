@@ -958,6 +958,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
+    wait_for_snapshot(
+      pid,
+      fn
+        %{polling: %{checking?: false}} -> true
+        _ -> false
+      end,
+      1_000
+    )
+
     now_ms = System.monotonic_time(:millisecond)
 
     :sys.replace_state(pid, fn state ->
@@ -1004,7 +1013,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot =
+      wait_for_snapshot(
+        pid,
+        fn
+          %{polling: %{checking?: true, next_poll_in_ms: nil}} -> true
+          _ -> false
+        end,
+        500
+      )
+
     assert %{polling: %{checking?: true, next_poll_in_ms: nil}} = snapshot
   end
 
@@ -1141,6 +1159,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       identifier: "MT-STALL",
       issue: %Issue{id: issue_id, identifier: "MT-STALL", state: "In Progress"},
       session_id: "thread-stall-turn-stall",
+      codex_app_server_pid: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
       last_codex_message: nil,
       last_codex_timestamp: stale_activity_at,
       last_codex_event: :notification,
@@ -1154,11 +1176,28 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid)
+
+    snapshot =
+      wait_for_snapshot(
+        pid,
+        fn
+          %{running: running, retrying: retrying} ->
+            Enum.all?(running, fn entry -> entry.issue_id != issue_id end) and
+              Enum.any?(retrying, fn entry ->
+                entry.issue_id == issue_id and
+                  entry.attempt == 1 and
+                  is_integer(entry.due_in_ms) and
+                  entry.identifier == "MT-STALL" and
+                  String.starts_with?(entry.error, "stalled for ")
+              end)
+
+          _ ->
+            false
+        end,
+        1_000
+      )
 
     refute Process.alive?(worker_pid)
-    refute Map.has_key?(state.running, issue_id)
 
     assert %{
              attempt: 1,
@@ -1172,6 +1211,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
     assert remaining_ms >= 8_500
     assert remaining_ms <= 10_500
+
+    retry_entry = Enum.find(snapshot.retrying, fn entry -> entry.issue_id == issue_id end)
+    assert is_integer(retry_entry.due_in_ms)
+    assert retry_entry.due_in_ms >= 7_000
+    assert retry_entry.due_in_ms <= 10_500
   end
 
   test "status dashboard renders offline marker to terminal" do

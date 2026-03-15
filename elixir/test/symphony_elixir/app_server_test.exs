@@ -149,6 +149,83 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "codex backend emits standard event envelope" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-backend-codex-events-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1200")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1200"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1200"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-backend-event-envelope",
+        identifier: "MT-1200",
+        title: "Backend event envelope",
+        description: "Ensure backend emits standard event payload envelope",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1200",
+        labels: ["backend"]
+      }
+
+      on_message = fn message -> send(self(), {:backend_message, message}) end
+
+      assert {:ok, %{session_id: "thread-1200-turn-1200"}} =
+               SymphonyElixir.Backend.Codex.run(workspace, "Standard event envelope", issue, on_message: on_message)
+
+      assert_received {:backend_message,
+                       %{
+                         event: :session_started,
+                         timestamp: %DateTime{},
+                         payload: %{
+                           session_id: "thread-1200-turn-1200",
+                           thread_id: "thread-1200",
+                           turn_id: "turn-1200"
+                         }
+                       }}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server passes explicit turn sandbox policies through unchanged" do
     test_root =
       Path.join(
@@ -892,15 +969,21 @@ defmodule SymphonyElixir.AppServerTest do
                  payload =
                    line
                    |> String.trim_leading("JSON:")
-                   |> Jason.decode!()
+                   |> Jason.decode()
 
-                 payload["id"] == 101 and
-                   get_in(payload, ["result", "success"]) == false and
-                   get_in(payload, ["result", "contentItems", Access.at(0), "type"]) == "inputText" and
-                   String.contains?(
-                     get_in(payload, ["result", "contentItems", Access.at(0), "text"]),
-                     "Unsupported dynamic tool"
-                   )
+                 case payload do
+                   {:ok, payload} ->
+                     payload["id"] == 101 and
+                       get_in(payload, ["result", "success"]) == false and
+                       get_in(payload, ["result", "contentItems", Access.at(0), "type"]) == "inputText" and
+                       String.contains?(
+                         get_in(payload, ["result", "contentItems", Access.at(0), "text"]),
+                         "Unsupported dynamic tool"
+                       )
+
+                   _ ->
+                     false
+                 end
                else
                  false
                end

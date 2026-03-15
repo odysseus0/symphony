@@ -151,6 +151,27 @@ codex:
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
+## Agent Backend Architecture
+
+Symphony routes agent execution through a backend behaviour so orchestrator and runner logic are
+not tied to Codex specifics.
+
+- `SymphonyElixir.AgentBackend` defines the minimal contract:
+  - `start_session/1`
+  - `run_turn/4`
+  - `stop_session/1`
+- `SymphonyElixir.Backend.Codex` is the default implementation (`agent.backend: "codex"`).
+- Callback events emitted through `run_turn/4` use a standard envelope:
+  `%{event: atom(), timestamp: DateTime.t(), payload: map()}`.
+- `SymphonyElixir.Codex.AppServer` remains as the Codex transport/runtime client; the backend
+  adapter wraps it to keep existing behavior while normalizing events for orchestration.
+
+To add a new backend:
+
+1. Implement `SymphonyElixir.AgentBackend` in a new module.
+2. Expose it via `agent.backend` (module name string or alias).
+3. Ensure it emits the standard event envelope and keeps `session()` as backend-owned opaque map.
+
 ## Web dashboard
 
 The observability UI now runs on a minimal Phoenix stack:

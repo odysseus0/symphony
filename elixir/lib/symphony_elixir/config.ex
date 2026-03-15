@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  alias SymphonyElixir.AgentBackend
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Workflow
 
@@ -142,7 +143,13 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_plane_project_id}
 
       true ->
-        :ok
+        case AgentBackend.resolve(settings.agent.backend) do
+          {:ok, _backend} ->
+            :ok
+
+          {:error, reason} ->
+            {:error, {:unsupported_agent_backend, settings.agent.backend, reason}}
+        end
     end
   end
 

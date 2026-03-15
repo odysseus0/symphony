@@ -1,11 +1,10 @@
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in its workspace with Codex.
+  Executes a single Linear issue in its workspace with the configured backend.
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, ErrorClassifier, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{AgentBackend, Config, ErrorClassifier, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   defmodule RunError do
     @moduledoc false
@@ -82,11 +81,23 @@ defmodule SymphonyElixir.AgentRunner do
       runtime_session_opts(runtime)
       |> Keyword.merge(issue: issue, trace_id: trace_id)
 
-    with {:ok, session} <- AppServer.start_session(workspace, session_opts) do
+    with {:ok, backend} <- resolve_backend(opts),
+         {:ok, session} <- backend.start_session(workspace, session_opts) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns, 0)
+        do_run_codex_turns(
+          backend,
+          session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          1,
+          max_turns,
+          0
+        )
       after
-        AppServer.stop_session(session)
+        backend.stop_session(session)
       end
     end
   end
@@ -105,12 +116,23 @@ defmodule SymphonyElixir.AgentRunner do
     ]
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, consecutive_empty) do
+  defp do_run_codex_turns(
+         backend,
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns,
+         consecutive_empty
+       ) do
     turn_start_ms = System.monotonic_time(:millisecond)
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
-           AppServer.run_turn(
+           backend.run_turn(
              app_session,
              prompt,
              issue,
@@ -142,6 +164,7 @@ defmodule SymphonyElixir.AgentRunner do
             Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
             do_run_codex_turns(
+              backend,
               app_session,
               workspace,
               refreshed_issue,
@@ -165,6 +188,18 @@ defmodule SymphonyElixir.AgentRunner do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  defp resolve_backend(opts) do
+    backend_setting = Keyword.get(opts, :backend, Config.settings!().agent.backend)
+
+    case AgentBackend.resolve(backend_setting) do
+      {:ok, backend} ->
+        {:ok, backend}
+
+      {:error, reason} ->
+        {:error, {:invalid_agent_backend, reason}}
     end
   end
 

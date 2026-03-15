@@ -55,6 +55,13 @@ mix specs.check
 mix pr_body.check --file /path/to/pr_body.md
 ```
 
+## Coordination Rules
+
+- Architectural changes require a design doc in `docs/design-docs/`
+- New work starts with an exec plan in `docs/exec-plans/active/`
+- Completed plans move to `docs/exec-plans/completed/`
+- Reference docs for key dependencies live in `docs/references/`
+
 ## Docs Update Policy
 
 If behavior/config changes, update docs in the same PR:
@@ -62,3 +69,4 @@ If behavior/config changes, update docs in the same PR:
 - `../README.md` for project concept and goals.
 - `README.md` for Elixir implementation and run instructions.
 - `WORKFLOW.md` for workflow/config contract changes.
+- `ARCHITECTURE.md` for structural changes.

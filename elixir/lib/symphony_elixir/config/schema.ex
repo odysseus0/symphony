@@ -117,6 +117,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
+      field(:backend, :string, default: "codex")
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
@@ -128,9 +129,11 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [:backend, :max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
         empty_values: []
       )
+      |> validate_required([:backend])
+      |> validate_length(:backend, min: 1)
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
@@ -449,6 +452,11 @@ defmodule SymphonyElixir.Config.Schema do
       | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
     }
 
+    agent = %{
+      settings.agent
+      | backend: normalize_agent_backend(settings.agent.backend)
+    }
+
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
@@ -457,7 +465,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     runtimes = finalize_runtimes(settings.runtimes, codex)
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex, runtimes: runtimes}
+    %{settings | tracker: tracker, workspace: workspace, agent: agent, codex: codex, runtimes: runtimes}
   end
 
   defp finalize_runtimes([], codex) do
@@ -571,6 +579,15 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_secret_value(_value), do: nil
+
+  defp normalize_agent_backend(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> "codex"
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_agent_backend(_value), do: "codex"
 
   defp default_turn_sandbox_policy(workspace) do
     writable_root =
