@@ -119,30 +119,32 @@ The agent talks to Linear via the `linear_graphql` tool injected by Symphony's a
 
 ## Risk classification
 
-Before deciding the review path, classify the change by risk level. This determines whether the agent self-reviews or escalates to a human.
+Before deciding the review path, classify the change by **risk level** and
+**checkpoint type**.
 
-**Low risk** (auto-merge):
-- Documentation fixes (README, CHANGELOG, comments, markdown files)
-- Typo / spelling / formatting corrections
-- Version bumps, dependency pin updates (patch only)
-- Removing dead code, unused imports, or deprecated references
-- Config file updates that do not alter runtime behavior
+- `risk_level`: `low | medium | high`
+  - `low`: docs/formatting/non-runtime config updates.
+  - `medium`: scoped bug fixes/refactors/tests without public API changes.
+  - `high`: cross-module architecture/security/CI/public API/data-shape changes.
+- `checkpoint_type`: `human-verify | decision | human-action`
+  - `human-verify`: agent can finish and auto-land without manual intervention.
+  - `decision`: human must choose a direction/tradeoff.
+  - `human-action`: human must execute a non-automatable operation.
 
-**Medium risk** (auto-merge with extended self-review):
-- Single-file bug fixes with targeted test coverage
-- Adding or updating tests without changing production code
-- Refactoring that does not change public API surface
-- Non-security linting / style fixes
+Checkpoint requirements:
 
-**High risk** (escalate to Human Review):
-- Architectural changes spanning 3+ modules
-- Security-related changes (auth, crypto, secret handling, input validation)
-- Changes to CI/CD pipelines or release workflows
-- Public API surface changes (new commands, changed flags, breaking changes)
-- Database schema or data migration changes
-- Changes the agent is uncertain about or that conflict with existing patterns
+- `decision`:
+  - add `decision-needed` label.
+  - include a `### Decision Options` section in workpad with numbered options and concise pros/cons.
+  - move issue to `Human Review`.
+- `human-action`:
+  - add `human-action` label.
+  - include a `### Human Action Steps` section in workpad with precise, deterministic steps.
+  - move issue to `Human Review`.
+- `human-verify`:
+  - keep normal risk routing: low/medium use auto-review path; high goes to `Human Review`.
 
-Record the risk classification and rationale in the workpad `### Risk Assessment` section before choosing a path.
+Record `risk_level`, `checkpoint_type`, and rationale in workpad `### Risk Assessment` before state transition.
 
 ## Status map
 
@@ -303,15 +305,17 @@ Use this only when completion is blocked by missing required tools or missing au
     - Confirm every required ticket-provided validation/test-plan item is explicitly marked complete in the workpad.
     - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-open and refresh the workpad before state transition so `Plan`, `Acceptance Criteria`, and `Validation` exactly match completed work.
-12. Apply risk classification (see `Risk classification` section above) and record it in the workpad `### Risk Assessment`.
-13. Route based on risk level:
-    - **Low / Medium risk** → run Step 3a (auto-review and auto-merge).
-    - **High risk** → move issue to `Human Review` and proceed to Step 3b.
+12. Apply risk classification and checkpoint classification (see `Risk classification` section above), then record `risk_level`, `checkpoint_type`, and rationale in workpad `### Risk Assessment`.
+13. Route based on `risk_level` + `checkpoint_type`:
+    - `checkpoint_type=decision` → add `decision-needed` label, ensure workpad contains `### Decision Options` (options + pros/cons), then move to `Human Review` (Step 3b).
+    - `checkpoint_type=human-action` → add `human-action` label, ensure workpad contains `### Human Action Steps` (exact manual steps), then move to `Human Review` (Step 3b).
+    - `checkpoint_type=human-verify` and **Low / Medium risk** → run Step 3a (auto-review and auto-merge).
+    - `checkpoint_type=human-verify` and **High risk** → move issue to `Human Review` and proceed to Step 3b.
     - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Human Review` with the blocker brief and explicit unblock actions.
 14. For `Todo` tickets that already had a PR attached at kickoff:
     - Ensure all existing PR feedback was reviewed and resolved, including inline review comments (code changes or explicit, justified pushback response).
     - Ensure branch was pushed with any required updates.
-    - Then route based on risk level as in step 13.
+    - Then route based on `risk_level` + `checkpoint_type` as in step 13.
 
 ## Step 3a: Auto-review and auto-merge (low / medium risk)
 
@@ -377,7 +381,9 @@ Record results in the workpad `### Goal-Backward Verification` section.
 - PR feedback sweep is complete and no actionable comments remain.
 - PR checks are green, branch is pushed, and PR is linked on the issue.
 - Required PR metadata is present (`symphony` label).
-- Risk classification is recorded in the workpad `### Risk Assessment` section.
+- Risk classification (`risk_level`) and checkpoint classification (`checkpoint_type`) are recorded in the workpad `### Risk Assessment` section.
+- If `checkpoint_type=decision`, workpad includes `### Decision Options` with options and pros/cons.
+- If `checkpoint_type=human-action`, workpad includes `### Human Action Steps` with precise ordered steps.
 - If app-touching, runtime validation is complete and media evidence is uploaded to the Linear workpad.
 
 ## Guardrails
@@ -396,6 +402,7 @@ Record results in the workpad `### Goal-Backward Verification` section.
   current issue.
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
 - In `Human Review`, do not make changes; wait and poll.
+- Keep `checkpoint_type=human-verify` on the no-human path unless `risk_level=high`.
 - If state is terminal (`Done`), do nothing and shut down.
 - Auto-review (Step 3a) is only permitted for low/medium risk changes. When in doubt, classify as high risk.
 - Maximum 3 auto-fix attempts per failing task. After 3 failures, record blocker and move on or escalate.
@@ -439,9 +446,18 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 
 ### Risk Assessment
 
-- Level: low | medium | high
+- risk_level: low | medium | high
+- checkpoint_type: human-verify | decision | human-action
 - Rationale: <one-line reason>
 - Review path: auto-review | human-review
+
+### Decision Options
+
+- <only for `checkpoint_type=decision`; include options with pros/cons>
+
+### Human Action Steps
+
+- <only for `checkpoint_type=human-action`; include precise ordered steps>
 
 ### Self-Review
 

@@ -1077,6 +1077,11 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Do not include \"next steps for user\""
     assert prompt =~ "use the `land` skill"
     assert prompt =~ "Do not call `gh pr merge` directly"
+    assert prompt =~ "checkpoint_type"
+    assert prompt =~ "decision-needed"
+    assert prompt =~ "human-action"
+    assert prompt =~ "### Decision Options"
+    assert prompt =~ "### Human Action Steps"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt #2"
   end

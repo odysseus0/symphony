@@ -92,6 +92,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Checkpoint · Human verify</p>
+            <p class="metric-value numeric"><%= @payload.checkpoint_waiting.human_verify %></p>
+            <p class="metric-detail">Issues waiting for a lightweight human confirmation.</p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Checkpoint · Decision</p>
+            <p class="metric-value numeric"><%= @payload.checkpoint_waiting.decision %></p>
+            <p class="metric-detail">Issues waiting for direction or tradeoff selection.</p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Checkpoint · Human action</p>
+            <p class="metric-value numeric"><%= @payload.checkpoint_waiting.human_action %></p>
+            <p class="metric-detail">Issues blocked on non-automatable manual steps.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">

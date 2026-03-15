@@ -316,6 +316,7 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             checkpoint_waiting: normalize_checkpoint_waiting(Map.get(snapshot, :checkpoint_waiting)),
              codex_totals: codex_totals,
              stats: Map.get(snapshot, :stats),
              rate_limits: Map.get(snapshot, :rate_limits),
@@ -341,6 +342,7 @@ defmodule SymphonyElixir.StatusDashboard do
         stats = Map.get(snapshot, :stats)
         stats_lines = format_stats_lines(stats)
         workspace = Map.get(snapshot, :workspace)
+        checkpoint_waiting = Map.get(snapshot, :checkpoint_waiting)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         workspace_line = format_workspace_usage_lines(workspace)
@@ -362,6 +364,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("#{agent_count}", @ansi_green) <>
              colorize("/", @ansi_gray) <>
              colorize("#{max_agents}", @ansi_gray),
+           format_checkpoint_waiting_line(checkpoint_waiting),
            colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
            colorize("│ Runtime: ", @ansi_bold) <>
              colorize(format_runtime_seconds(codex_seconds_running), @ansi_magenta),
@@ -539,6 +542,22 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_wave_line(_), do: []
 
+  defp format_checkpoint_waiting_line(checkpoint_waiting) when is_map(checkpoint_waiting) do
+    checkpoint_waiting = normalize_checkpoint_waiting(checkpoint_waiting)
+    human_verify = Map.get(checkpoint_waiting, :human_verify, 0)
+    decision = Map.get(checkpoint_waiting, :decision, 0)
+    human_action = Map.get(checkpoint_waiting, :human_action, 0)
+
+    colorize("│ Checkpoints: ", @ansi_bold) <>
+      colorize("verify #{human_verify}", @ansi_green) <>
+      colorize(" | ", @ansi_gray) <>
+      colorize("decision #{decision}", @ansi_yellow) <>
+      colorize(" | ", @ansi_gray) <>
+      colorize("human-action #{human_action}", @ansi_magenta)
+  end
+
+  defp format_checkpoint_waiting_line(_checkpoint_waiting), do: []
+
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
 
   defp dashboard_url do
@@ -695,6 +714,7 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             checkpoint_waiting: normalize_checkpoint_waiting(Map.get(snapshot, :checkpoint_waiting)),
              codex_totals: codex_totals,
              stats: Map.get(snapshot, :stats),
              rate_limits: Map.get(snapshot, :rate_limits),
@@ -707,6 +727,32 @@ defmodule SymphonyElixir.StatusDashboard do
       end
     else
       :error
+    end
+  end
+
+  defp normalize_checkpoint_waiting(waiting) when is_map(waiting) do
+    %{
+      human_verify: normalize_checkpoint_count(waiting, :human_verify),
+      decision: normalize_checkpoint_count(waiting, :decision),
+      human_action: normalize_checkpoint_count(waiting, :human_action)
+    }
+  end
+
+  defp normalize_checkpoint_waiting(_waiting) do
+    %{
+      human_verify: 0,
+      decision: 0,
+      human_action: 0
+    }
+  end
+
+  defp normalize_checkpoint_count(waiting, key) when is_map(waiting) and is_atom(key) do
+    value = Map.get(waiting, key) || Map.get(waiting, Atom.to_string(key)) || 0
+
+    if is_integer(value) and value >= 0 do
+      value
+    else
+      0
     end
   end
 
