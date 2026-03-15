@@ -5,6 +5,51 @@ defmodule SymphonyElixir.CLITest do
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
+  test "routes dynamic-tools-mcp subcommand without guardrails acknowledgement" do
+    parent = self()
+
+    deps = %{
+      file_regular?: fn _path ->
+        send(parent, :file_checked)
+        true
+      end,
+      set_workflow_file_path: fn _path ->
+        send(parent, :workflow_set)
+        :ok
+      end,
+      set_logs_root: fn _path ->
+        send(parent, :logs_root_set)
+        :ok
+      end,
+      set_server_port_override: fn _port ->
+        send(parent, :port_set)
+        :ok
+      end,
+      run_dynamic_tools_mcp: fn args ->
+        send(parent, {:mcp_subcommand, args})
+        :ok
+      end,
+      ensure_all_started: fn ->
+        send(parent, :started)
+        {:ok, [:symphony_elixir]}
+      end
+    }
+
+    assert :ok =
+             CLI.evaluate(
+               ["dynamic-tools-mcp", "--linear-api-key", "token", "--linear-endpoint", "https://example.invalid/graphql"],
+               deps
+             )
+
+    assert_received {:mcp_subcommand, ["--linear-api-key", "token", "--linear-endpoint", "https://example.invalid/graphql"]}
+
+    refute_received :file_checked
+    refute_received :workflow_set
+    refute_received :logs_root_set
+    refute_received :port_set
+    refute_received :started
+  end
+
   test "returns the guardrails acknowledgement banner when the flag is missing" do
     parent = self()
 

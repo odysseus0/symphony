@@ -23,8 +23,104 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
+Symphony now also ships a standalone MCP bridge for the same dynamic tools. It runs over stdio and
+exposes:
+
+- `linear_graphql`
+- `sync_workpad`
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
+
+## Dynamic Tools MCP bridge
+
+Start the MCP server as a standalone process:
+
+```bash
+./bin/symphony dynamic-tools-mcp
+```
+
+Auth can be provided either with `LINEAR_API_KEY` or explicit CLI flags:
+
+```bash
+./bin/symphony dynamic-tools-mcp --linear-api-key "$LINEAR_API_KEY"
+./bin/symphony dynamic-tools-mcp --linear-endpoint "https://api.linear.app/graphql"
+```
+
+The tool schema served by `tools/list`:
+
+```json
+{
+  "tools": [
+    {
+      "name": "linear_graphql",
+      "description": "Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string" },
+          "variables": { "type": ["object", "null"], "additionalProperties": true }
+        }
+      }
+    },
+    {
+      "name": "sync_workpad",
+      "description": "Create or update a workpad comment on a Linear issue. Reads the body from a local file to keep the conversation context small.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issue_id", "file_path"],
+        "properties": {
+          "issue_id": { "type": "string" },
+          "file_path": { "type": "string" },
+          "comment_id": { "type": "string" }
+        }
+      }
+    }
+  ]
+}
+```
+
+### Backend mount examples
+
+Codex compatibility:
+
+- Symphony keeps the existing `thread/start` `dynamicTools` injection path as backward-compatible
+  fallback.
+
+Claude Code (`--mcp-config`):
+
+```json
+{
+  "mcpServers": {
+    "symphony_dynamic_tools": {
+      "command": "/absolute/path/to/symphony/elixir/bin/symphony",
+      "args": ["dynamic-tools-mcp"],
+      "env": {
+        "LINEAR_API_KEY": "${LINEAR_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+OpenCode (MCP server block):
+
+```json
+{
+  "mcpServers": {
+    "symphony_dynamic_tools": {
+      "command": "/absolute/path/to/symphony/elixir/bin/symphony",
+      "args": ["dynamic-tools-mcp"],
+      "env": {
+        "LINEAR_API_KEY": "${LINEAR_API_KEY}"
+      }
+    }
+  }
+}
+```
 
 ## How to use it
 

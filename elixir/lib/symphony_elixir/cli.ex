@@ -3,6 +3,7 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
   """
 
+  alias SymphonyElixir.DynamicTools.MCPServer
   alias SymphonyElixir.LogFile
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
@@ -14,10 +15,15 @@ defmodule SymphonyElixir.CLI do
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
+          run_dynamic_tools_mcp: ([String.t()] -> :ok | {:error, String.t()}),
           ensure_all_started: (-> ensure_started_result())
         }
 
   @spec main([String.t()]) :: no_return()
+  def main(["dynamic-tools-mcp" | rest]) do
+    MCPServer.main(rest)
+  end
+
   def main(args) do
     case evaluate(args) do
       :ok ->
@@ -30,7 +36,13 @@ defmodule SymphonyElixir.CLI do
   end
 
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
-  def evaluate(args, deps \\ runtime_deps()) do
+  def evaluate(args, deps \\ runtime_deps())
+
+  def evaluate(["dynamic-tools-mcp" | rest], deps) do
+    deps.run_dynamic_tools_mcp.(rest)
+  end
+
+  def evaluate(args, deps) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
@@ -72,7 +84,12 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    """
+    Usage:
+      symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]
+      symphony dynamic-tools-mcp [--linear-api-key <token>] [--linear-endpoint <url>]
+    """
+    |> String.trim()
   end
 
   @spec runtime_deps() :: deps()
@@ -82,6 +99,7 @@ defmodule SymphonyElixir.CLI do
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
+      run_dynamic_tools_mcp: &MCPServer.run_cli/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
     }
   end
