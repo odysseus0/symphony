@@ -101,6 +101,8 @@ defmodule SymphonyElixir.TestSupport do
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+          worker_ssh_hosts: [],
+          worker_max_concurrent_agents_per_host: nil,
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
@@ -122,6 +124,9 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          agents: nil,
+          routing_default: nil,
+          routing_by_label: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -136,6 +141,8 @@ defmodule SymphonyElixir.TestSupport do
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
+    worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
+    worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
@@ -157,6 +164,9 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    agents = Keyword.get(config, :agents)
+    routing_default = Keyword.get(config, :routing_default)
+    routing_by_label = Keyword.get(config, :routing_by_label)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -174,6 +184,7 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
+        worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
@@ -190,6 +201,8 @@ defmodule SymphonyElixir.TestSupport do
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
+        agents_yaml(agents),
+        routing_yaml(routing_default, routing_by_label),
         "---",
         prompt
       ]
@@ -235,6 +248,21 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
+  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host)
+       when ssh_hosts in [nil, []] and is_nil(max_concurrent_agents_per_host),
+       do: nil
+
+  defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host) do
+    [
+      "worker:",
+      ssh_hosts not in [nil, []] && "  ssh_hosts: #{yaml_value(ssh_hosts)}",
+      !is_nil(max_concurrent_agents_per_host) &&
+        "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
   defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
     [
       "observability:",
@@ -266,5 +294,57 @@ defmodule SymphonyElixir.TestSupport do
       |> Enum.map_join("\n", &("    " <> &1))
 
     "  #{name}: |\n#{indented}"
+  end
+
+  defp agents_yaml(nil), do: nil
+
+  defp agents_yaml(agents) when is_map(agents) do
+    agent_lines =
+      Enum.flat_map(agents, fn {name, agent_config} ->
+        lines = [
+          "  #{name}:",
+          "    command: #{yaml_value(agent_config[:command] || "codex app-server")}",
+          "    approval_policy: #{yaml_value(agent_config[:approval_policy] || "never")}",
+          "    thread_sandbox: #{yaml_value(agent_config[:thread_sandbox] || "danger-full-access")}"
+        ]
+
+        lines =
+          if agent_config[:turn_sandbox_policy] do
+            lines ++ ["    turn_sandbox_policy: #{yaml_value(agent_config[:turn_sandbox_policy])}"]
+          else
+            lines
+          end
+
+        lines
+      end)
+
+    Enum.join(["agents:" | agent_lines], "\n")
+  end
+
+  defp routing_yaml(nil, nil), do: nil
+
+  defp routing_yaml(routing_default, routing_by_label) do
+    parts = ["routing:"]
+
+    parts =
+      if routing_default do
+        parts ++ ["  default_agent: #{yaml_value(routing_default)}"]
+      else
+        parts
+      end
+
+    parts =
+      if is_map(routing_by_label) and map_size(routing_by_label) > 0 do
+        by_label_lines =
+          Enum.map(routing_by_label, fn {label, agent} ->
+            "    #{label}: #{yaml_value(agent)}"
+          end)
+
+        parts ++ ["  by_label:"] ++ by_label_lines
+      else
+        parts
+      end
+
+    Enum.join(parts, "\n")
   end
 end

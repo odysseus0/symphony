@@ -20,6 +20,31 @@ Symphony polls a Linear project for active tickets. Each ticket gets an isolated
 
 The state machine lives in `WORKFLOW.md` — a markdown file with YAML frontmatter for config and a prompt body that defines agent behavior. Hot-reloads in under a second, no restart needed.
 
+## Multi-agent support
+
+Symphony supports routing issues to different coding agents via label-based routing. In addition to the default Codex agent, Symphony includes a protocol bridge for **Cursor CLI** using the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/). The `cursor-symphony-bridge` script translates between Symphony's app-server protocol and ACP's session-based JSON-RPC 2.0 protocol, enabling persistent sessions, streaming updates, and automatic permission handling.
+
+To route issues to Cursor, configure agents and routing in your `WORKFLOW.md`:
+
+```yaml
+agents:
+  cursor:
+    command: cursor-symphony-bridge --model gpt-5.4
+routing:
+  default_agent: cursor
+  # or route by label:
+  by_label:
+    use-cursor: cursor
+```
+
+The bridge forwards `--model` to the Cursor CLI at startup, so you can pin a
+specific model per agent definition. If you prefer an environment default,
+`CURSOR_MODEL=gpt-5.4` is also supported, but an explicit `--model` in
+`command:` takes precedence.
+
+Requires the Cursor CLI (`agent`) on PATH and `CURSOR_API_KEY` set in the
+environment.
+
 ## What's different from upstream
 
 - **Cheaper Linear calls** — agents no longer burn tokens on schema introspection before every GraphQL call, and workpad sync is a single dynamic tool instead of a hand-rolled mutation
@@ -30,10 +55,13 @@ The state machine lives in `WORKFLOW.md` — a markdown file with YAML frontmatt
 ## Manual setup
 
 1. Build: `git clone https://github.com/odysseus0/symphony && cd symphony/elixir && mise trust && mise install && mise exec -- mix setup && mise exec -- mix build`
-2. Install skills: `npx skills add odysseus0/symphony -a codex -s linear land commit push pull debug --copy -y` and copy `elixir/WORKFLOW.md` to your repo
-3. In WORKFLOW.md, set `tracker.project_slug` and `hooks.after_create` (clone your repo + setup commands)
-4. Add **Rework**, **Human Review**, **Merging** as custom states in Linear (Team Settings → Workflow)
-5. Commit, push, then: `mise exec -- ./bin/symphony /path/to/your-repo/WORKFLOW.md`
+2. Choose a skills source strategy:
+   - Default (recommended): project-local skills. Install worker skills into your repo with `npx skills add odysseus0/symphony -a codex -s linear land commit push pull debug --copy -y`
+   - Custom: central skills repo. Keep skills in a dedicated repo and sync them from `hooks.after_create`
+3. Copy `elixir/WORKFLOW.md` to your repo
+4. In WORKFLOW.md, set `tracker.project_slug` and `hooks.after_create` (clone your repo + setup commands). If using a central skills repo, also add a skills sync step in `after_create` after cloning your project.
+5. Add **Rework**, **Human Review**, **Merging** as custom states in Linear (Team Settings → Workflow)
+6. Commit, push, then: `mise exec -- ./bin/symphony /path/to/your-repo/WORKFLOW.md`
 
 **[Getting Started with OpenAI Symphony](https://x.com/odysseus0z/status/2031850264240800131)** — full walkthrough with context on why these defaults matter.
 

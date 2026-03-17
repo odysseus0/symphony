@@ -196,6 +196,25 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, :workflow_front_matter_not_a_map} = Workflow.load(workflow_path)
   end
 
+  test "workflow load preserves valid UTF-8 in prompt with multibyte characters" do
+    workflow_path =
+      Path.join(
+        Path.dirname(Workflow.workflow_file_path()),
+        "UNICODE_WORKFLOW.md"
+      )
+
+    unicode_prompt = "Priority: 必须 阻塞 建议 推荐\nDash — and arrow →"
+    File.write!(workflow_path, "---\ntracker:\n  kind: linear\n---\n#{unicode_prompt}\n")
+    on_exit(fn -> File.rm(workflow_path) end)
+
+    assert {:ok, %{prompt: prompt}} = Workflow.load(workflow_path)
+    assert String.valid?(prompt)
+    assert prompt =~ "必须"
+    assert prompt =~ "阻塞"
+    assert prompt =~ "—"
+    assert {:ok, _} = Jason.encode(%{"text" => prompt})
+  end
+
   test "SymphonyElixir.start_link delegates to the orchestrator" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
@@ -701,6 +720,53 @@ defmodule SymphonyElixir.CoreTest do
 
     assert coalesced_state.tick_token == refreshed_state.tick_token
     assert {:noreply, ^coalesced_state} = Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
+  end
+
+  test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{
+      running: %{
+        "issue-1" => %{worker_host: "worker-a"}
+      }
+    }
+
+    assert Orchestrator.select_worker_host_for_test(state, nil) == "worker-b"
+  end
+
+  test "select_worker_host_for_test returns no_worker_capacity when every ssh host is full" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{
+      running: %{
+        "issue-1" => %{worker_host: "worker-a"},
+        "issue-2" => %{worker_host: "worker-b"}
+      }
+    }
+
+    assert Orchestrator.select_worker_host_for_test(state, nil) == :no_worker_capacity
+  end
+
+  test "select_worker_host_for_test keeps the preferred ssh host when it still has capacity" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 2
+    )
+
+    state = %Orchestrator.State{
+      running: %{
+        "issue-1" => %{worker_host: "worker-a"},
+        "issue-2" => %{worker_host: "worker-b"}
+      }
+    }
+
+    assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
@@ -1574,6 +1640,196 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "app server resolves command from workspace scripts directory" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-workspace-scripts-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-89")
+      scripts_dir = Path.join(workspace, "scripts")
+      bridge_binary = Path.join(scripts_dir, "cursor-symphony-bridge")
+      trace_file = Path.join(test_root, "workspace-scripts.trace")
+
+      File.mkdir_p!(scripts_dir)
+
+      File.write!(bridge_binary, """
+      #!/bin/sh
+      trace_file="#{trace_file}"
+      count=0
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+      printf 'CWD:%s\\n' "$PWD" >> "$trace_file"
+      printf 'PATH:%s\\n' "$PATH" >> "$trace_file"
+
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-89"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-89"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(bridge_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "cursor-symphony-bridge"
+      )
+
+      issue = %Issue{
+        id: "issue-workspace-script",
+        identifier: "MT-89",
+        title: "Resolve command from workspace scripts",
+        description: "Ensure workspace scripts are on PATH for app server startup",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-89",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Run from workspace scripts", issue)
+
+      lines = File.read!(trace_file) |> String.split("\n", trim: true)
+      expanded_scripts_dir = Path.join(Path.expand(workspace), "scripts")
+
+      assert Enum.any?(lines, &String.starts_with?(&1, "ARGV:"))
+      assert cwd_line = Enum.find(lines, &String.starts_with?(&1, "CWD:"))
+      assert String.ends_with?(cwd_line, Path.basename(workspace))
+      assert path_line = Enum.find(lines, &String.starts_with?(&1, "PATH:"))
+      assert String.contains?(path_line, expanded_scripts_dir)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent_config_for_issue returns codex config when no routing configured" do
+    issue = %Issue{
+      id: "issue-no-routing",
+      identifier: "MT-300",
+      title: "No routing configured",
+      description: "Should fall back to codex",
+      state: "Todo",
+      labels: ["backend"]
+    }
+
+    agent_config = Config.agent_config_for_issue(issue)
+    codex_config = Config.settings!().codex
+
+    assert agent_config.command == codex_config.command
+    assert agent_config.approval_policy == codex_config.approval_policy
+    assert agent_config.thread_sandbox == codex_config.thread_sandbox
+  end
+
+  test "agent_config_for_issue returns cursor config when label matches" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agents: %{cursor: [command: "cursor-symphony-bridge", approval_policy: "never", thread_sandbox: "danger-full-access"]},
+      routing_by_label: %{"use-cursor" => "cursor"}
+    )
+
+    issue = %Issue{
+      id: "issue-cursor-label",
+      identifier: "MT-301",
+      title: "Route to cursor",
+      description: "Label matches cursor agent",
+      state: "Todo",
+      labels: ["use-cursor"]
+    }
+
+    agent_config = Config.agent_config_for_issue(issue)
+    assert agent_config.command == "cursor-symphony-bridge"
+  end
+
+  test "agent_config_for_issue falls back to codex when label maps to nonexistent agent" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      routing_by_label: %{"use-unknown" => "nonexistent"}
+    )
+
+    issue = %Issue{
+      id: "issue-unknown-agent",
+      identifier: "MT-302",
+      title: "Unknown agent fallback",
+      description: "Agent name not in agents map",
+      state: "Todo",
+      labels: ["use-unknown"]
+    }
+
+    agent_config = Config.agent_config_for_issue(issue)
+    codex_config = Config.settings!().codex
+
+    assert agent_config.command == codex_config.command
+  end
+
+  test "agent_config_for_issue uses routing.default when no label match" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agents: %{cursor: [command: "cursor-symphony-bridge"]},
+      routing_default: "cursor",
+      routing_by_label: %{"special" => "cursor"}
+    )
+
+    issue = %Issue{
+      id: "issue-default-route",
+      identifier: "MT-303",
+      title: "Default agent route",
+      description: "No label matches, uses default",
+      state: "Todo",
+      labels: ["unrelated"]
+    }
+
+    agent_config = Config.agent_config_for_issue(issue)
+    assert agent_config.command == "cursor-symphony-bridge"
+  end
+
+  test "agents with invalid config are silently dropped" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agents: %{
+        valid_agent: [command: "valid-command"],
+        invalid_agent: [command: ""]
+      }
+    )
+
+    settings = Config.settings!()
+    assert Map.has_key?(settings.agents, "valid_agent")
+    assert settings.agents["valid_agent"].command == "valid-command"
+    refute Map.has_key?(settings.agents, "invalid_agent")
+  end
+
+  test "agent_config_for_issue uses first matching label" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agents: %{cursor: [command: "cursor-symphony-bridge"]},
+      routing_by_label: %{"use-cursor" => "cursor"}
+    )
+
+    issue = %Issue{
+      id: "issue-first-label",
+      identifier: "MT-304",
+      title: "First label match",
+      description: "Second label matches",
+      state: "Todo",
+      labels: ["no-match", "use-cursor"]
+    }
+
+    agent_config = Config.agent_config_for_issue(issue)
+    assert agent_config.command == "cursor-symphony-bridge"
   end
 
   test "app server startup payload uses configurable approval and sandbox settings from workflow config" do

@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
@@ -72,6 +73,22 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec agent_config_for_issue(Issue.t()) :: Schema.Codex.t()
+  def agent_config_for_issue(%Issue{labels: labels}) do
+    settings = settings!()
+    routing = settings.routing
+
+    agent_name =
+      Enum.find_value(labels, routing.default_agent, fn label ->
+        Map.get(routing.by_label, label)
+      end)
+
+    case agent_name do
+      "codex" -> settings.codex
+      name -> Map.get(settings.agents, name, settings.codex)
+    end
+  end
+
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
     case Workflow.current() do
@@ -98,11 +115,12 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec codex_runtime_settings(Path.t() | nil) :: {:ok, codex_runtime_settings()} | {:error, term()}
-  def codex_runtime_settings(workspace \\ nil) do
+  @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
+          {:ok, codex_runtime_settings()} | {:error, term()}
+  def codex_runtime_settings(workspace \\ nil, opts \\ []) do
     with {:ok, settings} <- settings() do
       with {:ok, turn_sandbox_policy} <-
-             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace) do
+             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
         {:ok,
          %{
            approval_policy: settings.codex.approval_policy,
