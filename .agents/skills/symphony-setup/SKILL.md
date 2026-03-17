@@ -29,10 +29,22 @@ Report results to the user before proceeding.
 
 ## Build Symphony
 
-Use the [fork](https://github.com/odysseus0/symphony) — easier to get started with:
+Prefer cloning the current repo's remote when running from a Symphony fork. Resolve the source in this order:
+
+1. `origin` remote URL of the current git repo
+2. `upstream` remote URL of the current git repo
+3. Fallback: [odysseus0/symphony](https://github.com/odysseus0/symphony)
 
 ```bash
-git clone https://github.com/odysseus0/symphony
+SYMPHONY_REPO_URL="$(git remote get-url origin 2>/dev/null || true)"
+if [ -z "$SYMPHONY_REPO_URL" ]; then
+  SYMPHONY_REPO_URL="$(git remote get-url upstream 2>/dev/null || true)"
+fi
+if [ -z "$SYMPHONY_REPO_URL" ]; then
+  SYMPHONY_REPO_URL="https://github.com/odysseus0/symphony.git"
+fi
+
+git clone "$SYMPHONY_REPO_URL"
 cd symphony/elixir
 mise trust && mise install
 mise exec -- mix setup
