@@ -58,6 +58,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       pid: self(),
       ref: make_ref(),
       identifier: issue.identifier,
+      runtime_name: "claude-reviewer",
       trace_id: "trace-snapshot-001",
       issue: issue,
       session_id: nil,
@@ -99,6 +100,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
+
     assert %{
              usage_bytes: usage_bytes,
              warning_threshold_bytes: warning_threshold_bytes,
@@ -110,6 +112,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert done_closed_keep_count == 5
     assert snapshot_entry.issue_id == issue_id
     assert snapshot_entry.trace_id == "trace-snapshot-001"
+    assert snapshot_entry.runtime_name == "claude-reviewer"
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now
@@ -695,6 +698,160 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.codex_total_tokens == 14
   end
 
+  test "orchestrator snapshot tracks claude result usage payloads" do
+    issue_id = "issue-claude-result-usage"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-223A",
+      title: "Claude result usage",
+      description: "Track direct Claude result usage payloads",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-223A"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :ClaudeResultUsageOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         payload: %{
+           "type" => "result",
+           "subtype" => "success",
+           "usage" => %{
+             "input_tokens" => 15_000,
+             "output_tokens" => 5_000,
+             "total_tokens" => 20_000
+           }
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.codex_input_tokens == 15_000
+    assert snapshot_entry.codex_output_tokens == 5_000
+    assert snapshot_entry.codex_total_tokens == 20_000
+    assert_in_delta snapshot_entry.context_usage_percent, 5.0, 0.001
+  end
+
+  test "orchestrator snapshot tracks context usage percent from codex model context window" do
+    issue_id = "issue-context-usage-percent"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-223B",
+      title: "Context usage percent",
+      description: "Use runtime model context window when available",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-223B"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :ContextUsagePercentOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "thread/tokenUsage/updated",
+           "params" => %{
+             "tokenUsage" => %{
+               "total" => %{
+                 "inputTokens" => 1_500,
+                 "outputTokens" => 500,
+                 "totalTokens" => 2_000
+               },
+               "modelContextWindow" => 20_000
+             }
+           }
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.codex_input_tokens == 1_500
+    assert snapshot_entry.codex_output_tokens == 500
+    assert snapshot_entry.codex_total_tokens == 2_000
+    assert_in_delta snapshot_entry.context_usage_percent, 10.0, 0.001
+  end
+
   test "orchestrator token accounting ignores last_token_usage without cumulative totals" do
     issue_id = "issue-last-token-ignored"
 
@@ -1177,8 +1334,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    on_exit(fn ->
+      if is_nil(previous_memory_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_memory_issues)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_kind: "memory",
       codex_stall_timeout_ms: 1_000
     )
 
@@ -1224,6 +1393,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
+    before_tick_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
 
     snapshot =
@@ -1259,13 +1429,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = current_state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 7_500
-    assert remaining_ms <= 10_500
+    scheduled_delay_ms = due_at_ms - before_tick_ms
+    assert scheduled_delay_ms >= 10_000
+    assert scheduled_delay_ms <= 10_500
 
     retry_entry = Enum.find(snapshot.retrying, fn entry -> entry.issue_id == issue_id end)
     assert is_integer(retry_entry.due_in_ms)
-    assert retry_entry.due_in_ms >= 7_000
+    assert retry_entry.due_in_ms >= 9_000
     assert retry_entry.due_in_ms <= 10_500
   end
 

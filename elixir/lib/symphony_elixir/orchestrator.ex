@@ -183,29 +183,29 @@ defmodule SymphonyElixir.Orchestrator do
                     delay_type: :continuation
                   })
 
-            _ ->
-              failure_attempt =
-                case next_retry_attempt_from_running(running_entry) do
-                  attempt when is_integer(attempt) and attempt > 0 -> attempt
-                  _ -> 1
-                end
+                _ ->
+                  failure_attempt =
+                    case next_retry_attempt_from_running(running_entry) do
+                      attempt when is_integer(attempt) and attempt > 0 -> attempt
+                      _ -> 1
+                    end
 
-              issue = Map.get(running_entry, :issue)
-              error_class = ErrorClassifier.classify(reason)
-              error_class_label = ErrorClassifier.to_string(error_class)
+                  issue = Map.get(running_entry, :issue)
+                  error_class = ErrorClassifier.classify(reason)
+                  error_class_label = ErrorClassifier.to_string(error_class)
 
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} error_class=#{error_class_label} next_retry_attempt=#{failure_attempt}")
+                  Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} error_class=#{error_class_label} next_retry_attempt=#{failure_attempt}")
 
-              handle_worker_failure(
-                state,
-                issue,
-                issue_id,
-                running_entry.identifier || issue_id,
-                reason,
-                error_class,
-                failure_attempt
-              )
-          end
+                  handle_worker_failure(
+                    state,
+                    issue,
+                    issue_id,
+                    running_entry.identifier || issue_id,
+                    reason,
+                    error_class,
+                    failure_attempt
+                  )
+              end
 
             Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
             state
@@ -1048,9 +1048,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_dispatch_issue(%State{} = state, issue, attempt) do
     case Config.resolve_runtime_for_issue(issue) do
       nil ->
-        Logger.warning(
-          "No matching runtime for #{issue_context(issue)} labels=#{inspect(issue.labels)}; skipping dispatch"
-        )
+        Logger.warning("No matching runtime for #{issue_context(issue)} labels=#{inspect(issue.labels)}; skipping dispatch")
 
         state
 
@@ -1094,6 +1092,8 @@ defmodule SymphonyElixir.Orchestrator do
               codex_last_reported_input_tokens: 0,
               codex_last_reported_output_tokens: 0,
               codex_last_reported_total_tokens: 0,
+              context_window_tokens: default_context_window_tokens(),
+              context_usage_percent: 0.0,
               turn_count: 0,
               retry_attempt: normalize_retry_attempt(attempt),
               started_at: DateTime.utc_now(),
@@ -1321,17 +1321,13 @@ defmodule SymphonyElixir.Orchestrator do
           Workspace.cleanup_completed_issue_workspaces(issues, keep_recent: keep_recent)
 
         if removed != [] do
-          Logger.info(
-            "Workspace retention cleanup source=#{source} removed=#{length(removed)} keep_recent=#{keep_recent}"
-          )
+          Logger.info("Workspace retention cleanup source=#{source} removed=#{length(removed)} keep_recent=#{keep_recent}")
         end
 
         :ok
 
       {:error, reason} ->
-        Logger.warning(
-          "Skipping terminal workspace cleanup source=#{source}; failed to fetch terminal issues: #{inspect(reason)}"
-        )
+        Logger.warning("Skipping terminal workspace cleanup source=#{source}; failed to fetch terminal issues: #{inspect(reason)}")
 
         :ok
     end
@@ -1395,9 +1391,7 @@ defmodule SymphonyElixir.Orchestrator do
          source
        )
        when previous_exceeded? != true do
-    Logger.warning(
-      "Workspace disk usage exceeded warning threshold source=#{source} usage_bytes=#{usage_bytes} threshold_bytes=#{warning_threshold_bytes}"
-    )
+    Logger.warning("Workspace disk usage exceeded warning threshold source=#{source} usage_bytes=#{usage_bytes} threshold_bytes=#{warning_threshold_bytes}")
   end
 
   defp maybe_log_workspace_threshold_transition(
@@ -1407,9 +1401,7 @@ defmodule SymphonyElixir.Orchestrator do
          warning_threshold_bytes,
          source
        ) do
-    Logger.info(
-      "Workspace disk usage back under threshold source=#{source} usage_bytes=#{usage_bytes} threshold_bytes=#{warning_threshold_bytes}"
-    )
+    Logger.info("Workspace disk usage back under threshold source=#{source} usage_bytes=#{usage_bytes} threshold_bytes=#{warning_threshold_bytes}")
   end
 
   defp maybe_log_workspace_threshold_transition(
@@ -1741,8 +1733,10 @@ defmodule SymphonyElixir.Orchestrator do
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
           codex_total_tokens: metadata.codex_total_tokens,
+          context_usage_percent: Map.get(metadata, :context_usage_percent),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
+          runtime_name: Map.get(metadata, :runtime_name),
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
@@ -1806,6 +1800,14 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
+    next_input_tokens = codex_input_tokens + token_delta.input_tokens
+    next_output_tokens = codex_output_tokens + token_delta.output_tokens
+    next_total_tokens = codex_total_tokens + token_delta.total_tokens
+
+    context_window_tokens =
+      extract_context_window_tokens(update) ||
+        Map.get(running_entry, :context_window_tokens) ||
+        default_context_window_tokens()
 
     {
       Map.merge(running_entry, %{
@@ -1815,12 +1817,14 @@ defmodule SymphonyElixir.Orchestrator do
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
-        codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
-        codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
-        codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
+        codex_input_tokens: next_input_tokens,
+        codex_output_tokens: next_output_tokens,
+        codex_total_tokens: next_total_tokens,
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
+        context_window_tokens: context_window_tokens,
+        context_usage_percent: context_usage_percent(next_total_tokens, context_window_tokens),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
       }),
       token_delta
@@ -2281,10 +2285,26 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp extract_token_usage(update) do
+    # Codex backend wraps via to_standard_event, nesting the original payload
+    # under update[:payload][:payload]. Claude stream-json nests usage under
+    # payload["message"]["usage"] or payload["usage"].
+    nested_payload = get_in(update, [:payload, :payload])
+
+    claude_message_usage =
+      get_in(update, [:payload, "message", "usage"]) ||
+        get_in(nested_payload || %{}, ["message", "usage"])
+
+    claude_result_usage =
+      get_in(update, [:payload, "usage"]) ||
+        get_in(nested_payload || %{}, ["usage"])
+
     payloads = [
       update[:usage],
       Map.get(update, "usage"),
       Map.get(update, :usage),
+      claude_message_usage,
+      claude_result_usage,
+      nested_payload,
       update[:payload],
       Map.get(update, "payload"),
       update
@@ -2304,22 +2324,60 @@ defmodule SymphonyElixir.Orchestrator do
       rate_limits_from_payload(update)
   end
 
-  defp absolute_token_usage_from_payload(payload) when is_map(payload) do
-    absolute_paths = [
-      ["params", "msg", "payload", "info", "total_token_usage"],
-      [:params, :msg, :payload, :info, :total_token_usage],
-      ["params", "msg", "info", "total_token_usage"],
-      [:params, :msg, :info, :total_token_usage],
-      ["params", "tokenUsage", "total"],
-      [:params, :tokenUsage, :total],
-      ["tokenUsage", "total"],
-      [:tokenUsage, :total]
+  defp extract_context_window_tokens(update) do
+    nested_payload = get_in(update, [:payload, :payload])
+
+    payloads = [
+      nested_payload,
+      update[:payload],
+      Map.get(update, "payload"),
+      update
     ]
 
-    explicit_map_at_paths(payload, absolute_paths)
+    Enum.find_value(payloads, &context_window_tokens_from_payload/1)
+  end
+
+  defp absolute_token_usage_from_payload(payload) when is_map(payload) do
+    cond do
+      integer_token_map?(payload) ->
+        payload
+
+      true ->
+        absolute_paths = [
+          ["params", "msg", "payload", "info", "total_token_usage"],
+          [:params, :msg, :payload, :info, :total_token_usage],
+          ["params", "msg", "info", "total_token_usage"],
+          [:params, :msg, :info, :total_token_usage],
+          ["params", "tokenUsage", "total"],
+          [:params, :tokenUsage, :total],
+          ["tokenUsage", "total"],
+          [:tokenUsage, :total]
+        ]
+
+        explicit_map_at_paths(payload, absolute_paths)
+    end
   end
 
   defp absolute_token_usage_from_payload(_payload), do: nil
+
+  defp context_window_tokens_from_payload(payload) when is_map(payload) do
+    integer_at_paths(payload, [
+      ["params", "msg", "payload", "info", "model_context_window"],
+      [:params, :msg, :payload, :info, :model_context_window],
+      ["params", "msg", "info", "model_context_window"],
+      [:params, :msg, :info, :model_context_window],
+      ["params", "tokenUsage", "modelContextWindow"],
+      [:params, :tokenUsage, :modelContextWindow],
+      ["tokenUsage", "modelContextWindow"],
+      [:tokenUsage, :modelContextWindow],
+      ["model_context_window"],
+      [:model_context_window],
+      ["modelContextWindow"],
+      [:modelContextWindow]
+    ])
+  end
+
+  defp context_window_tokens_from_payload(_payload), do: nil
 
   defp turn_completed_usage_from_payload(payload) when is_map(payload) do
     method = Map.get(payload, "method") || Map.get(payload, :method)
@@ -2413,6 +2471,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp explicit_map_at_paths(_payload, _paths), do: nil
+
+  defp integer_at_paths(payload, paths) when is_map(payload) and is_list(paths) do
+    Enum.find_value(paths, fn path ->
+      payload
+      |> map_at_path(path)
+      |> integer_like()
+    end)
+  end
+
+  defp integer_at_paths(_payload, _paths), do: nil
 
   defp map_at_path(payload, path) when is_map(payload) and is_list(path) do
     Enum.reduce_while(path, payload, fn key, acc ->
@@ -2517,6 +2585,21 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp running_seconds(_started_at, _now), do: 0
+
+  defp context_usage_percent(total_tokens, context_window_tokens)
+       when is_integer(total_tokens) and total_tokens >= 0 and is_integer(context_window_tokens) and
+              context_window_tokens > 0 do
+    total_tokens / context_window_tokens * 100.0
+  end
+
+  defp context_usage_percent(_total_tokens, _context_window_tokens), do: nil
+
+  defp default_context_window_tokens do
+    case Config.settings!().agent.context_window_tokens do
+      value when is_integer(value) and value > 0 -> value
+      _ -> 400_000
+    end
+  end
 
   defp integer_like(value) when is_integer(value) and value >= 0, do: value
 

@@ -361,6 +361,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "trace_id" => "trace-http-001",
                  "state" => "In Progress",
                  "session_id" => "thread-http",
+                 "runtime_name" => "claude-reviewer",
                  "turn_count" => 7,
                  "last_event" => "notification",
                  "last_message" => "rendered",
@@ -465,6 +466,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "running" => %{
                "trace_id" => "trace-http-001",
                "session_id" => "thread-http",
+               "runtime_name" => "claude-reviewer",
                "turn_count" => 7,
                "state" => "In Progress",
                "started_at" => issue_payload["running"]["started_at"],
@@ -628,6 +630,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Checkpoint · Human action"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
+    assert html =~ "claude-reviewer"
     assert html =~ "Completed"
     assert html =~ "Failed"
     assert html =~ "Success rate"
@@ -646,6 +649,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           trace_id: "trace-http-001",
           state: "In Progress",
           session_id: "thread-http",
+          runtime_name: "codex-reviewer",
           turn_count: 8,
           last_codex_event: :notification,
           last_codex_message: %{
@@ -676,7 +680,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     StatusDashboard.notify_update()
 
     assert_eventually(fn ->
-      render(view) =~ "agent message content streaming: structured update"
+      rendered = render(view)
+
+      rendered =~ "agent message content streaming: structured update" and
+        rendered =~ "codex-reviewer"
     end)
   end
 
@@ -783,6 +790,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           trace_id: "trace-http-001",
           state: "In Progress",
           session_id: "thread-http",
+          runtime_name: "claude-reviewer",
           turn_count: 7,
           codex_app_server_pid: nil,
           last_codex_message: "rendered",
