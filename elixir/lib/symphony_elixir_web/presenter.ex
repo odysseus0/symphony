@@ -146,6 +146,7 @@ defmodule SymphonyElixirWeb.Presenter do
       trace_id: Map.get(entry, :trace_id),
       state: entry.state,
       session_id: entry.session_id,
+      runtime_name: Map.get(entry, :runtime_name),
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
@@ -174,6 +175,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       trace_id: Map.get(running, :trace_id),
       session_id: running.session_id,
+      runtime_name: Map.get(running, :runtime_name),
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
       started_at: iso8601(running.started_at),

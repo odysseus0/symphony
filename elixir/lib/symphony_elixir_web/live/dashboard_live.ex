@@ -246,7 +246,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <% end %>
                       </div>
                     </td>
-                    <td class="numeric"><%= format_runtime_and_turns(entry.started_at, entry.turn_count, @now) %></td>
+                    <td>
+                      <div class="detail-stack">
+                        <span class="mono"><%= runtime_label(entry) %></span>
+                        <span class="muted numeric"><%= format_runtime_and_turns(entry.started_at, entry.turn_count, @now) %></span>
+                      </div>
+                    </td>
                     <td>
                       <div class="detail-stack">
                         <span
@@ -354,6 +359,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
     mins = div(whole_seconds, 60)
     secs = rem(whole_seconds, 60)
     "#{mins}m #{secs}s"
+  end
+
+  defp runtime_label(entry) when is_map(entry) do
+    case Map.get(entry, :runtime_name) do
+      value when is_binary(value) and value != "" -> value
+      _ -> "default"
+    end
   end
 
   defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
