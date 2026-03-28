@@ -726,6 +726,50 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "per-state concurrency limit blocks dispatch when state slot is full" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      max_concurrent_agents: 10,
+      max_concurrent_agents_by_state: %{"Auto Review" => 1, "Merging" => 1}
+    )
+
+    running_issue = %Issue{
+      id: "running-review-1",
+      identifier: "MT-2001",
+      title: "Already reviewing",
+      state: "Auto Review"
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 10,
+      running: %{
+        "running-review-1" => %{issue: running_issue, pid: self(), workspace: "/tmp/ws"}
+      },
+      claimed: MapSet.new(["running-review-1"]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    new_review_issue = %Issue{
+      id: "review-2",
+      identifier: "MT-2002",
+      title: "Another review",
+      state: "Auto Review"
+    }
+
+    # Auto Review limited to 1 — slot full, should NOT dispatch
+    refute Orchestrator.should_dispatch_issue_for_test(new_review_issue, state)
+
+    # Todo has no per-state limit — uses global 10, should dispatch
+    todo_issue = %Issue{
+      id: "todo-1",
+      identifier: "MT-2003",
+      title: "Normal todo",
+      state: "Todo"
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(todo_issue, state)
+  end
+
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
     stale_issue = %Issue{
       id: "blocked-2",

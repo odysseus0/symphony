@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, ErrorClassifier, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, ErrorClassifier, RateLimitCircuitBreaker, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_base_delay_ms 5_000
@@ -30,6 +30,10 @@ defmodule SymphonyElixir.Orchestrator do
     decision: 0,
     human_action: 0
   }
+
+  # Per-issue dispatch cooldown: exponential backoff 30s → 60s → 120s → … → 300s cap
+  @dispatch_cooldown_base_ms 30_000
+  @dispatch_cooldown_max_ms 300_000
 
   defmodule State do
     @moduledoc """
@@ -60,7 +64,10 @@ defmodule SymphonyElixir.Orchestrator do
       stats_issue_started_at_ms: %{},
       stats_finalized_issue_ids: MapSet.new(),
       dispatch_wave: nil,
-      checkpoint_waiting: %{}
+      checkpoint_waiting: %{},
+      dispatch_cooldowns: %{},
+      circuit_breakers: %{},
+      terminal_issue_ids: MapSet.new()
     ]
   end
 
@@ -160,6 +167,7 @@ defmodule SymphonyElixir.Orchestrator do
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
+        state = check_rate_limit_circuit_breaker(state, running_entry, reason)
         session_id = running_entry_session_id(running_entry)
 
         state =
@@ -167,21 +175,33 @@ defmodule SymphonyElixir.Orchestrator do
             state =
               case reason do
                 :normal ->
-                  continuation_attempt =
-                    case running_entry[:retry_attempt] do
-                      a when is_integer(a) and a > 0 -> a + 1
-                      _ -> 1
-                    end
+                  if MapSet.member?(state.terminal_issue_ids, issue_id) do
+                    Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; issue already marked terminal, releasing claim")
 
-                  Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling continuation check (attempt #{continuation_attempt})")
+                    identifier = running_entry.identifier
+                    cleanup_issue_workspace(identifier)
 
-                  state
-                  |> complete_issue(issue_id)
-                  |> schedule_issue_retry(issue_id, continuation_attempt, %{
-                    identifier: running_entry.identifier,
-                    trace_id: running_entry[:trace_id],
-                    delay_type: :continuation
-                  })
+                    state
+                    |> complete_issue(issue_id)
+                    |> record_issue_outcome(issue_id, "done")
+                    |> release_issue_claim(issue_id)
+                  else
+                    continuation_attempt =
+                      case running_entry[:retry_attempt] do
+                        a when is_integer(a) and a > 0 -> a + 1
+                        _ -> 1
+                      end
+
+                    Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling continuation check (attempt #{continuation_attempt})")
+
+                    state
+                    |> complete_issue(issue_id)
+                    |> schedule_issue_retry(issue_id, continuation_attempt, %{
+                      identifier: running_entry.identifier,
+                      trace_id: running_entry[:trace_id],
+                      delay_type: :continuation
+                    })
+                  end
 
                 _ ->
                   failure_attempt =
@@ -240,6 +260,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
+  def handle_info({:agent_issue_terminal, issue_id, state_name}, state)
+      when is_binary(issue_id) and is_binary(state_name) do
+    Logger.info("Agent reported terminal state for issue_id=#{issue_id} state=#{state_name}; caching")
+    {:noreply, mark_issue_terminal(state, issue_id)}
+  end
+
+  def handle_info({:agent_issue_terminal, _issue_id, _state_name}, state),
+    do: {:noreply, state}
+
   def handle_info({:linear_graphql_response_time_ms, response_time_ms}, state)
       when is_integer(response_time_ms) and response_time_ms >= 0 do
     {:noreply, record_linear_response_time_ms(state, response_time_ms)}
@@ -285,6 +314,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
+    state = expire_circuit_breakers(state)
     state = refresh_checkpoint_waiting_counts(state)
 
     with :ok <- Config.validate!(),
@@ -441,6 +471,48 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec record_dispatch_cooldown_for_test(term(), Issue.t()) :: term()
+  def record_dispatch_cooldown_for_test(%State{} = state, %Issue{} = issue) do
+    record_dispatch_cooldown(state, issue)
+  end
+
+  @doc false
+  @spec reset_dispatch_cooldown_for_test(term(), String.t()) :: term()
+  def reset_dispatch_cooldown_for_test(%State{} = state, issue_id) when is_binary(issue_id) do
+    reset_dispatch_cooldown(state, issue_id)
+  end
+
+  @doc false
+  @spec check_rate_limit_circuit_breaker_for_test(term(), map(), term()) :: term()
+  def check_rate_limit_circuit_breaker_for_test(%State{} = state, running_entry, reason) do
+    check_rate_limit_circuit_breaker(state, running_entry, reason)
+  end
+
+  @doc false
+  @spec runtime_circuit_broken_for_test(term(), Issue.t()) :: boolean()
+  def runtime_circuit_broken_for_test(%State{} = state, %Issue{} = issue) do
+    runtime_circuit_broken?(state, issue)
+  end
+
+  @doc false
+  @spec expire_circuit_breakers_for_test(term()) :: term()
+  def expire_circuit_breakers_for_test(%State{} = state) do
+    expire_circuit_breakers(state)
+  end
+
+  @doc false
+  @spec mark_issue_terminal_for_test(term(), String.t()) :: term()
+  def mark_issue_terminal_for_test(%State{} = state, issue_id) when is_binary(issue_id) do
+    mark_issue_terminal(state, issue_id)
+  end
+
+  @doc false
+  @spec clear_terminal_issue_id_for_test(term(), String.t()) :: term()
+  def clear_terminal_issue_id_for_test(%State{} = state, issue_id) when is_binary(issue_id) do
+    clear_terminal_issue_id(state, issue_id)
+  end
+
+  @doc false
   @spec issue_waves_for_dispatch_for_test([Issue.t()]) :: [[Issue.t()]]
   def issue_waves_for_dispatch_for_test(issues) when is_list(issues) do
     active_states = active_state_set()
@@ -467,7 +539,9 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
         state
+        |> clear_terminal_issue_id(issue.id)
         |> record_issue_outcome(issue.id, issue.state)
+        |> reset_dispatch_cooldown(issue.id)
         |> terminate_running_issue(issue.id, true)
 
       !issue_routable_to_worker?(issue) ->
@@ -922,14 +996,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed} = state,
+         %State{running: running, claimed: claimed, terminal_issue_ids: terminal_ids} = state,
          active_states,
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
+      !MapSet.member?(terminal_ids, issue.id) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
+      dispatch_cooldown_elapsed?(state, issue) and
+      !runtime_circuit_broken?(state, issue) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running)
   end
@@ -943,6 +1020,110 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp state_slots_available?(_issue, _running), do: false
+
+  # ---------------------------------------------------------------------------
+  # Per-issue dispatch cooldown (exponential backoff)
+  # ---------------------------------------------------------------------------
+
+  defp dispatch_cooldown_elapsed?(%State{dispatch_cooldowns: cooldowns}, %Issue{id: issue_id, state: issue_state}) do
+    case Map.get(cooldowns, issue_id) do
+      nil ->
+        true
+
+      %{last_dispatched_at_ms: last_ms, attempts: attempts, last_state: last_state} ->
+        if normalize_issue_state(issue_state) != normalize_issue_state(last_state) do
+          # Issue changed state — cooldown no longer applies
+          true
+        else
+          delay_ms = dispatch_cooldown_delay_ms(attempts)
+          now_ms = System.monotonic_time(:millisecond)
+          now_ms - last_ms >= delay_ms
+        end
+    end
+  end
+
+  @doc false
+  @spec dispatch_cooldown_delay_ms(non_neg_integer()) :: non_neg_integer()
+  def dispatch_cooldown_delay_ms(attempts) when is_integer(attempts) and attempts >= 0 do
+    if attempts <= 0 do
+      0
+    else
+      power = min(attempts - 1, 10)
+      min(@dispatch_cooldown_base_ms * (1 <<< power), @dispatch_cooldown_max_ms)
+    end
+  end
+
+  defp record_dispatch_cooldown(%State{dispatch_cooldowns: cooldowns} = state, %Issue{id: issue_id, state: issue_state}) do
+    now_ms = System.monotonic_time(:millisecond)
+    normalized = normalize_issue_state(issue_state)
+
+    entry = Map.get(cooldowns, issue_id)
+
+    new_entry =
+      case entry do
+        %{last_state: ^normalized, attempts: prev_attempts} ->
+          %{last_dispatched_at_ms: now_ms, attempts: prev_attempts + 1, last_state: normalized}
+
+        _ ->
+          # First dispatch or state changed — start fresh
+          %{last_dispatched_at_ms: now_ms, attempts: 1, last_state: normalized}
+      end
+
+    %{state | dispatch_cooldowns: Map.put(cooldowns, issue_id, new_entry)}
+  end
+
+  defp reset_dispatch_cooldown(%State{dispatch_cooldowns: cooldowns} = state, issue_id) do
+    %{state | dispatch_cooldowns: Map.delete(cooldowns, issue_id)}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Rate-limit circuit breaker
+  # ---------------------------------------------------------------------------
+
+  defp check_rate_limit_circuit_breaker(%State{} = state, running_entry, reason)
+       when is_map(running_entry) do
+    runtime_name = Map.get(running_entry, :runtime_name)
+
+    # Check the exit reason first (covers crash/error exits)
+    {tripped?, breakers} =
+      RateLimitCircuitBreaker.maybe_trip(state.circuit_breakers, runtime_name, reason)
+
+    # If not tripped by exit reason, also check the last message from the backend
+    # (covers normal exits where the output contained a rate-limit notice)
+    {_tripped?, breakers} =
+      if tripped? do
+        {true, breakers}
+      else
+        last_msg = extract_last_message_text(running_entry)
+        RateLimitCircuitBreaker.maybe_trip(breakers, runtime_name, last_msg)
+      end
+
+    %{state | circuit_breakers: breakers}
+  end
+
+  defp check_rate_limit_circuit_breaker(state, _running_entry, _reason), do: state
+
+  defp extract_last_message_text(running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :last_codex_message) do
+      %{message: msg} when is_binary(msg) -> msg
+      %{message: msg} when is_map(msg) -> inspect(msg, pretty: false, printable_limit: 4_000)
+      _ -> nil
+    end
+  end
+
+  defp extract_last_message_text(_running_entry), do: nil
+
+  defp runtime_circuit_broken?(%State{circuit_breakers: breakers}, %Issue{} = issue) do
+    case Config.resolve_runtime_for_issue(issue) do
+      nil -> false
+      %{name: name} when is_binary(name) -> RateLimitCircuitBreaker.open?(breakers, name)
+      _ -> false
+    end
+  end
+
+  defp expire_circuit_breakers(%State{circuit_breakers: breakers} = state) do
+    %{state | circuit_breakers: RateLimitCircuitBreaker.expire_recovered(breakers)}
+  end
 
   defp running_issue_count_for_state(running, issue_state) when is_map(running) do
     normalized_state = normalize_issue_state(issue_state)
@@ -1101,6 +1282,7 @@ defmodule SymphonyElixir.Orchestrator do
             })
 
           state = mark_issue_dispatch_started(state, issue.id, now_ms)
+          state = record_dispatch_cooldown(state, issue)
 
           %{
             state
@@ -1149,6 +1331,16 @@ defmodule SymphonyElixir.Orchestrator do
       | completed: MapSet.put(state.completed, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
+  end
+
+  defp mark_issue_terminal(%State{terminal_issue_ids: terminal} = state, issue_id)
+       when is_binary(issue_id) do
+    %{state | terminal_issue_ids: MapSet.put(terminal, issue_id)}
+  end
+
+  defp clear_terminal_issue_id(%State{terminal_issue_ids: terminal} = state, issue_id)
+       when is_binary(issue_id) do
+    %{state | terminal_issue_ids: MapSet.delete(terminal, issue_id)}
   end
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
@@ -1247,7 +1439,11 @@ defmodule SymphonyElixir.Orchestrator do
         end)
 
         cleanup_issue_workspace(issue.identifier)
-        {:noreply, release_issue_claim(state, issue_id)}
+
+        {:noreply,
+         state
+         |> clear_terminal_issue_id(issue_id)
+         |> release_issue_claim(issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
