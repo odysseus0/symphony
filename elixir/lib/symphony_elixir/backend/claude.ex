@@ -112,6 +112,7 @@ defmodule SymphonyElixir.Backend.Claude do
     base = [
       "-p", prompt,
       "--output-format", "stream-json",
+      "--verbose",
       "--permission-mode", session.permission_mode
     ]
 
@@ -315,7 +316,11 @@ defmodule SymphonyElixir.Backend.Claude do
   # -- Helpers --
 
   defp generate_session_id do
-    "symphony-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+
+    :io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", [a, b, c, d, e])
+    |> IO.iodata_to_binary()
+    |> String.downcase()
   end
 
   defp emit_message(on_message, event, details) when is_function(on_message, 1) do
