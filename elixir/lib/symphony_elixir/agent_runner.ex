@@ -242,7 +242,8 @@ defmodule SymphonyElixir.AgentRunner do
 
           :ok
 
-        {:done, _refreshed_issue} ->
+        {:done, refreshed_issue} ->
+          notify_issue_terminal(codex_update_recipient, issue, refreshed_issue)
           :ok
 
         {:error, reason} ->
@@ -250,6 +251,13 @@ defmodule SymphonyElixir.AgentRunner do
       end
     end
   end
+
+  defp notify_issue_terminal(recipient, %Issue{id: issue_id}, %Issue{state: state_name})
+       when is_pid(recipient) and is_binary(issue_id) and is_binary(state_name) do
+    send(recipient, {:agent_issue_terminal, issue_id, state_name})
+  end
+
+  defp notify_issue_terminal(_recipient, _issue, _refreshed_issue), do: :ok
 
   defp resolve_backend(opts) do
     runtime = Keyword.get(opts, :runtime)
@@ -574,10 +582,17 @@ defmodule SymphonyElixir.AgentRunner do
     # payload under message[:payload][:payload]. Include that path for extraction.
     nested_payload = get_in(message, [:payload, :payload])
 
+    # Claude stream-json nests usage under payload["message"]["usage"] (assistant events)
+    # and payload["usage"] (result events).
+    claude_message_usage = get_in(message, [:payload, "message", "usage"])
+    claude_result_usage = get_in(message, [:payload, "usage"])
+
     payloads = [
       message[:usage],
       Map.get(message, "usage"),
       Map.get(message, :usage),
+      claude_message_usage,
+      claude_result_usage,
       nested_payload,
       message[:payload],
       Map.get(message, "payload"),
