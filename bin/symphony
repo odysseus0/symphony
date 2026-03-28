@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# Symphony CLI wrapper — run from any project directory.
-# Usage: symphony start|on|stop|off|status
+# Symphony CLI — single entry point for all project directories.
+#
+# Usage:
+#   symphony on                 # start in current directory (requires WORKFLOW.md)
+#   symphony on spanory         # start for named project
+#   symphony stop               # stop instance for current directory
+#   symphony stop spanory       # stop instance for named project
+#   symphony status [project]   # check if running
 set -euo pipefail
 
-SYMPHONY_BIN="/Users/javis/Documents/workspace/projects/symphony/elixir/bin/symphony"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SYMPHONY_BIN="${SCRIPT_DIR}/elixir/bin/symphony"
 GUARDRAIL_FLAG="--i-understand-that-this-will-be-running-without-the-usual-guardrails"
-PIDFILE="/tmp/symphony-$(echo "$PWD" | md5 -q).pid"
+PROJECTS_ROOT="/Users/javis/Documents/workspace/projects"
 
+# ── Environment ──────────────────────────────────────────────────────────────
 setup_env() {
   export LINEAR_API_KEY
   LINEAR_API_KEY="$(security find-generic-password -a "$USER" -s LINEAR_API_KEY -w)"
@@ -16,42 +24,87 @@ setup_env() {
   export PATH="/Users/javis/.local/share/mise/installs/erlang/28.4.1/bin:/Users/javis/.local/share/mise/installs/elixir/1.19.5-otp-28/bin:${MIX_HOME}/escripts:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 }
 
-case "${1:-start}" in
-  start|on)
+# ── Resolve project directory ────────────────────────────────────────────────
+resolve_project_dir() {
+  local project="${1:-}"
+
+  if [ -z "$project" ]; then
+    # No argument — use current directory
     if [ ! -f WORKFLOW.md ]; then
       echo "No WORKFLOW.md in current directory: $PWD" >&2
       exit 1
     fi
-    # Guard: prevent multiple instances for the same project directory
+    echo "$PWD"
+    return
+  fi
+
+  # Try exact path, then common locations
+  if [ -d "$project" ] && [ -f "$project/WORKFLOW.md" ]; then
+    echo "$(cd "$project" && pwd)"
+  elif [ -d "$PROJECTS_ROOT/$project" ]; then
+    echo "$PROJECTS_ROOT/$project"
+  elif [ -d "$PROJECTS_ROOT/${project}-all/$project" ]; then
+    echo "$PROJECTS_ROOT/${project}-all/$project"
+  else
+    echo "Project not found: $project" >&2
+    echo "Searched: $project, $PROJECTS_ROOT/$project, $PROJECTS_ROOT/${project}-all/$project" >&2
+    exit 1
+  fi
+}
+
+# ── PID file path (deterministic per project directory) ──────────────────────
+pidfile_for() {
+  echo "/tmp/symphony-$(echo "$1" | md5 -q).pid"
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+ACTION="${1:-start}"
+PROJECT_ARG="${2:-}"
+
+case "$ACTION" in
+  start|on)
+    PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
+    PIDFILE="$(pidfile_for "$PROJECT_DIR")"
+
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-      echo "Symphony already running for $PWD (pid $(cat "$PIDFILE"))" >&2
-      echo "Use 'symphony stop' first, or 'symphony status' to check." >&2
+      echo "Symphony already running for $PROJECT_DIR (pid $(cat "$PIDFILE"))" >&2
+      echo "Use 'symphony stop${PROJECT_ARG:+ $PROJECT_ARG}' first." >&2
       exit 1
     fi
+
     setup_env
-    echo "Symphony starting in: $PWD"
-    # Write PID file (exec replaces this process, so write the upcoming PID)
+    echo "Symphony starting in: $PROJECT_DIR"
+    cd "$PROJECT_DIR"
     echo $$ > "$PIDFILE"
     exec "$SYMPHONY_BIN" "$GUARDRAIL_FLAG"
     ;;
+
   stop|off)
+    PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
+    PIDFILE="$(pidfile_for "$PROJECT_DIR")"
+
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
       kill "$(cat "$PIDFILE")"
       rm -f "$PIDFILE"
-      echo "Symphony stopped"
+      echo "Symphony stopped for $PROJECT_DIR"
     else
-      echo "No running Symphony found for $PWD"
+      echo "No running Symphony found for $PROJECT_DIR"
     fi
     ;;
+
   status)
+    PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
+    PIDFILE="$(pidfile_for "$PROJECT_DIR")"
+
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-      echo "Running (pid $(cat "$PIDFILE"))"
+      echo "Running for $PROJECT_DIR (pid $(cat "$PIDFILE"))"
     else
-      echo "Not running"
+      echo "Not running for $PROJECT_DIR"
     fi
     ;;
+
   *)
-    echo "Usage: symphony [start|on|stop|off|status]" >&2
+    echo "Usage: symphony [on|off|status] [project-name]" >&2
     exit 1
     ;;
 esac
