@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{AgentBackend, Config, ErrorClassifier, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{AgentBackend, ErrorClassifier, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   defmodule RunError do
     @moduledoc false
@@ -17,6 +17,9 @@ defmodule SymphonyElixir.AgentRunner do
   @empty_turn_ratio_window 5
   @empty_turn_ratio_threshold 0.6
   @empty_turn_backoff_base_ms 2_000
+  @default_agent_max_turns 20
+  @default_active_states ["Todo", "In Progress"]
+  @default_context_window_tokens 400_000
   @type error_class :: ErrorClassifier.error_class()
   @context_warning_remaining_ratio 0.35
   @context_critical_remaining_ratio 0.25
@@ -25,7 +28,7 @@ defmodule SymphonyElixir.AgentRunner do
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     trace_id = issue_trace_id(issue, opts)
     issue = attach_trace_id(issue, trace_id)
-    opts = maybe_put_trace_id_opt(opts, trace_id)
+    opts = opts |> maybe_put_trace_id_opt(trace_id) |> inject_default_runner_options()
 
     with_issue_logger_metadata(issue, trace_id, fn ->
       Logger.info("Starting agent run for #{issue_context(issue)}")
@@ -78,10 +81,11 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts) do
     runtime = Keyword.get(opts, :runtime)
-    default_max_turns = Config.settings!().agent.max_turns
+    default_max_turns = Keyword.get(opts, :max_turns, @default_agent_max_turns)
     max_turns = runtime_max_turns(runtime, default_max_turns)
     context_monitor = init_context_monitor(opts)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    active_states = runner_active_states(opts)
     trace_id = issue_trace_id(issue, opts)
 
     session_opts =
@@ -99,6 +103,7 @@ defmodule SymphonyElixir.AgentRunner do
           codex_update_recipient,
           opts,
           issue_state_fetcher,
+          active_states,
           1,
           max_turns,
           0,
@@ -138,6 +143,7 @@ defmodule SymphonyElixir.AgentRunner do
          codex_update_recipient,
          opts,
          issue_state_fetcher,
+         active_states,
          turn_number,
          max_turns,
          consecutive_empty,
@@ -174,7 +180,7 @@ defmodule SymphonyElixir.AgentRunner do
 
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns} elapsed_ms=#{turn_elapsed_ms}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
+      case continue_with_issue?(issue, issue_state_fetcher, active_states) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
           next_consecutive_empty = if empty_turn?, do: consecutive_empty + 1, else: 0
           next_total_empty = if empty_turn?, do: total_empty + 1, else: total_empty
@@ -214,19 +220,20 @@ defmodule SymphonyElixir.AgentRunner do
 
               Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-              do_run_codex_turns(
-                backend,
-                next_app_session,
-                workspace,
-                refreshed_issue,
-                codex_update_recipient,
-                opts,
-                issue_state_fetcher,
-                turn_number + 1,
-                max_turns,
-                next_consecutive_empty,
-                next_total_empty,
-                next_context_monitor
+                do_run_codex_turns(
+                  backend,
+                  next_app_session,
+                  workspace,
+                  refreshed_issue,
+                  codex_update_recipient,
+                  opts,
+                  issue_state_fetcher,
+                  active_states,
+                  turn_number + 1,
+                  max_turns,
+                  next_consecutive_empty,
+                  next_total_empty,
+                  next_context_monitor
               )
           end
 
@@ -291,10 +298,10 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher, active_states) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) do
+        if active_issue_state?(refreshed_issue.state, active_states) do
           {:continue, refreshed_issue}
         else
           {:done, refreshed_issue}
@@ -308,16 +315,16 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  defp continue_with_issue?(issue, _issue_state_fetcher, _active_states), do: {:done, issue}
 
-  defp active_issue_state?(state_name) when is_binary(state_name) do
+  defp active_issue_state?(state_name, active_states) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
 
-    Config.settings!().tracker.active_states
+    active_states
     |> Enum.any?(fn active_state -> normalize_issue_state(active_state) == normalized_state end)
   end
 
-  defp active_issue_state?(_state_name), do: false
+  defp active_issue_state?(_state_name, _active_states), do: false
 
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     state_name
@@ -386,10 +393,32 @@ defmodule SymphonyElixir.AgentRunner do
   defp maybe_put_logger_metadata(metadata, _key, value) when value in [nil, ""], do: metadata
   defp maybe_put_logger_metadata(metadata, key, value), do: Keyword.put(metadata, key, value)
 
+  defp inject_default_runner_options(opts) when is_list(opts) do
+    opts
+    |> Keyword.put_new(:max_turns, @default_agent_max_turns)
+    |> Keyword.put_new(:context_window_tokens, @default_context_window_tokens)
+    |> Keyword.put_new(:active_states, @default_active_states)
+  end
+
+  defp runner_active_states(opts) when is_list(opts) do
+    opts
+    |> Keyword.get(:active_states, @default_active_states)
+    |> normalize_runner_active_states()
+  end
+
+  defp normalize_runner_active_states(active_states) when is_list(active_states) do
+    active_states
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&normalize_issue_state/1)
+    |> Enum.filter(&(&1 != ""))
+  end
+
+  defp normalize_runner_active_states(_active_states), do: @default_active_states
+
   defp init_context_monitor(opts) when is_list(opts) do
     context_window_tokens =
       opts
-      |> Keyword.get(:context_window_tokens, Config.settings!().agent.context_window_tokens)
+      |> Keyword.get(:context_window_tokens, @default_context_window_tokens)
       |> positive_integer_or(400_000)
 
     warning_remaining_ratio =

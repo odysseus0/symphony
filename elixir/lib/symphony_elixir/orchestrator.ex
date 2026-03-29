@@ -1062,13 +1062,23 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_dispatch_issue_with_runtime(%State{} = state, issue, attempt, runtime) do
     recipient = self()
     trace_id = new_trace_id()
+    config = Config.settings!()
 
     Logger.info("Selected runtime=#{runtime.name} for #{issue_context(issue)}")
 
     with_issue_logger_metadata(issue.identifier, trace_id, fn ->
       case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
              Logger.metadata(trace_id: trace_id, issue_identifier: issue.identifier)
-             AgentRunner.run(issue, recipient, attempt: attempt, trace_id: trace_id, runtime: runtime)
+             AgentRunner.run(
+               issue,
+               recipient,
+               attempt: attempt,
+               trace_id: trace_id,
+               runtime: runtime,
+               max_turns: config.agent.max_turns,
+               active_states: config.tracker.active_states,
+               context_window_tokens: config.agent.context_window_tokens
+             )
            end) do
         {:ok, pid} ->
           ref = Process.monitor(pid)

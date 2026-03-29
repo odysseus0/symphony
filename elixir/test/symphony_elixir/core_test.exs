@@ -1,6 +1,17 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  @agent_runner_defaults [
+    max_turns: 20,
+    active_states: ["Todo", "In Progress"],
+    context_window_tokens: 400_000
+  ]
+
+  defp agent_runner_opts(overrides \\ []) when is_list(overrides) do
+    @agent_runner_defaults
+    |> Keyword.merge(overrides)
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1213,7 +1224,7 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue)
+      assert :ok = AgentRunner.run(issue, nil, agent_runner_opts([]))
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =
@@ -1304,7 +1315,7 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(
                  issue,
                  test_pid,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 agent_runner_opts(issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
                )
 
       assert_receive {:codex_worker_update, "issue-live-updates",
@@ -1421,7 +1432,16 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(
+                 issue,
+                 nil,
+                 agent_runner_opts(
+                   issue_state_fetcher: state_fetcher,
+                   max_turns: 3,
+                   context_window_tokens: 100
+                 )
+               )
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
 
@@ -1538,7 +1558,16 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(
+                 issue,
+                 nil,
+                 agent_runner_opts(
+                   issue_state_fetcher: state_fetcher,
+                   max_turns: 2,
+                   context_window_tokens: 100
+                 )
+               )
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
@@ -2021,7 +2050,7 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok = AgentRunner.run(issue, nil, agent_runner_opts(issue_state_fetcher: state_fetcher, context_window_tokens: 100))
 
       trace_lines = File.read!(trace_file) |> String.split("\n", trim: true)
 

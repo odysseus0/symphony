@@ -107,6 +107,16 @@ defmodule SymphonyElixir.LiveE2ETest do
 
   # ── Main E2E runner ──
 
+  @agent_runner_defaults [
+    max_turns: 20,
+    active_states: ["Todo", "In Progress"],
+    context_window_tokens: 400_000
+  ]
+
+  defp agent_runner_opts(extra_opts) when is_list(extra_opts) do
+    @agent_runner_defaults |> Keyword.merge(extra_opts)
+  end
+
   defp run_e2e(tracker, backend) do
     test_root =
       Path.join(
@@ -135,7 +145,7 @@ defmodule SymphonyElixir.LiveE2ETest do
       write_final_workflow!(workflow_file, tracker, ctx, workspace_root, backend, backend_command)
 
       # Phase 4: run the agent
-      assert :ok = AgentRunner.run(ctx.issue, nil, max_turns: 1)
+      assert :ok = AgentRunner.run(ctx.issue, nil, agent_runner_opts(max_turns: 1))
 
       # Phase 5: verify outcomes
       verify_completion!(tracker, ctx)

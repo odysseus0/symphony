@@ -2,6 +2,15 @@ defmodule SymphonyElixir.MultiBackendConcurrencyTest do
   use SymphonyElixir.TestSupport
 
   @backends [:codex, :opencode, :claude]
+  @agent_runner_defaults [
+    max_turns: 20,
+    active_states: ["Todo", "In Progress"],
+    context_window_tokens: 400_000
+  ]
+
+  defp agent_runner_opts(extra_opts) when is_list(extra_opts) do
+    @agent_runner_defaults |> Keyword.merge(extra_opts)
+  end
 
   test "concurrent mixed backend runs stay isolated per issue" do
     test_root =
@@ -100,9 +109,11 @@ defmodule SymphonyElixir.MultiBackendConcurrencyTest do
                AgentRunner.run(
                  issue,
                  nil,
-                 max_turns: 1,
-                 runtime: runtime,
-                 issue_state_fetcher: fn _issue_ids -> {:ok, []} end
+                 agent_runner_opts(
+                   max_turns: 1,
+                   runtime: runtime,
+                   issue_state_fetcher: fn _issue_ids -> {:ok, []} end
+                 )
                )
 
       trace = File.read!(trace_file)
