@@ -4,71 +4,116 @@
 # Usage:
 #   symphony on                 # start in current directory (requires WORKFLOW.md)
 #   symphony on spanory         # start for named project
-#   symphony stop               # stop instance for current directory
-#   symphony stop spanory       # stop instance for named project
-#   symphony status [project]   # check if running
+#   symphony off                # stop instance (HTTP graceful shutdown, fallback SIGTERM)
+#   symphony off spanory        # stop instance for named project
+#   symphony status [project]   # check if running (reads instance.json)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0")")/.." && pwd)"
 SYMPHONY_BIN="${SCRIPT_DIR}/elixir/bin/symphony"
 GUARDRAIL_FLAG="--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 PROJECTS_ROOT="/Users/javis/Documents/workspace/projects"
+INSTANCE_DIR="${HOME}/.config/symphony"
+INSTANCE_FILE="${INSTANCE_DIR}/instance.json"
 
 # ── Environment ──────────────────────────────────────────────────────────────
 setup_env() {
-  export LINEAR_API_KEY
-  LINEAR_API_KEY="$(security find-generic-password -a "$USER" -s LINEAR_API_KEY -w)"
-  export HOME="/Users/javis"
-  export MIX_HOME="/Users/javis/.local/share/mise/installs/elixir/1.19.5-otp-28/.mix"
-  export MIX_ARCHIVES="${MIX_HOME}/archives"
-  export PATH="/Users/javis/.local/share/mise/installs/erlang/28.4.1/bin:/Users/javis/.local/share/mise/installs/elixir/1.19.5-otp-28/bin:${MIX_HOME}/escripts:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+	export LINEAR_API_KEY
+	LINEAR_API_KEY="$(security find-generic-password -a "$USER" -s LINEAR_API_KEY -w)"
+	export HOME="/Users/javis"
+	export MIX_HOME="/Users/javis/.local/share/mise/installs/elixir/1.19.5-otp-28/.mix"
+	export MIX_ARCHIVES="${MIX_HOME}/archives"
+	export PATH="/Users/javis/.local/share/mise/installs/erlang/28.4.1/bin:/Users/javis/.local/share/mise/installs/elixir/1.19.5-otp-28/bin:${MIX_HOME}/escripts:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+}
+
+# ── Write instance.json ───────────────────────────────────────────────────────
+write_instance_json() {
+	local pid="$1"
+	local port="${2:-4000}"
+	local project_dir="$3"
+	local started_at
+	started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+	mkdir -p "$INSTANCE_DIR"
+	python3 -c "
+import json, sys
+data = {
+    'pid': int(sys.argv[1]),
+    'port': int(sys.argv[2]),
+    'started_at': sys.argv[3],
+    'project_dir': sys.argv[4]
+}
+with open(sys.argv[5], 'w') as f:
+    json.dump(data, f, indent=2)
+" "$pid" "$port" "$started_at" "$project_dir" "$INSTANCE_FILE"
+}
+
+# ── Read instance.json fields ─────────────────────────────────────────────────
+read_instance_json() {
+	if [ ! -f "$INSTANCE_FILE" ]; then
+		return 1
+	fi
+	python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    print('inst_pid=' + str(data.get('pid', '')))
+    print('inst_port=' + str(data.get('port', '4000')))
+    print('inst_started_at=' + str(data.get('started_at', '')))
+    print('inst_project_dir=' + str(data.get('project_dir', '')))
+except Exception as e:
+    sys.exit(1)
+" "$INSTANCE_FILE"
+}
+
+# ── Remove instance.json ──────────────────────────────────────────────────────
+remove_instance_json() {
+	rm -f "$INSTANCE_FILE"
 }
 
 # ── Resolve project directory ────────────────────────────────────────────────
 resolve_project_dir() {
-  local project="${1:-}"
+	local project="${1:-}"
 
-  if [ -z "$project" ]; then
-    # No argument — use current directory
-    echo "$PWD"
-    return
-  fi
+	if [ -z "$project" ]; then
+		echo "$PWD"
+		return
+	fi
 
-  # Try exact path, then common locations
-  if [ -d "$project" ]; then
-    echo "$(cd "$project" && pwd)"
-  elif [ -d "$PROJECTS_ROOT/$project" ]; then
-    echo "$PROJECTS_ROOT/$project"
-  elif [ -d "$PROJECTS_ROOT/${project}-all/$project" ]; then
-    echo "$PROJECTS_ROOT/${project}-all/$project"
-  else
-    echo "Project not found: $project" >&2
-    echo "Searched: $project, $PROJECTS_ROOT/$project, $PROJECTS_ROOT/${project}-all/$project" >&2
-    exit 1
-  fi
+	if [ -d "$project" ]; then
+		echo "$(cd "$project" && pwd)"
+	elif [ -d "$PROJECTS_ROOT/$project" ]; then
+		echo "$PROJECTS_ROOT/$project"
+	elif [ -d "$PROJECTS_ROOT/${project}-all/$project" ]; then
+		echo "$PROJECTS_ROOT/${project}-all/$project"
+	else
+		echo "Project not found: $project" >&2
+		echo "Searched: $project, $PROJECTS_ROOT/$project, $PROJECTS_ROOT/${project}-all/$project" >&2
+		exit 1
+	fi
 }
 
 # ── Find WORKFLOW.md in project directory ────────────────────────────────────
 find_workflow() {
-  local dir="$1"
-  # Direct match first, then one level deep
-  if [ -f "$dir/WORKFLOW.md" ]; then
-    echo "$dir/WORKFLOW.md"
-  else
-    for candidate in "$dir"/*/WORKFLOW.md; do
-      if [ -f "$candidate" ]; then
-        echo "$candidate"
-        return
-      fi
-    done
-    echo "No WORKFLOW.md found in $dir or its immediate subdirectories" >&2
-    exit 1
-  fi
+	local dir="$1"
+	if [ -f "$dir/WORKFLOW.md" ]; then
+		echo "$dir/WORKFLOW.md"
+	else
+		for candidate in "$dir"/*/WORKFLOW.md; do
+			if [ -f "$candidate" ]; then
+				echo "$candidate"
+				return
+			fi
+		done
+		echo "No WORKFLOW.md found in $dir or its immediate subdirectories" >&2
+		exit 1
+	fi
 }
 
 # ── PID file path (deterministic per project directory) ──────────────────────
 pidfile_for() {
-  echo "/tmp/symphony-$(echo "$1" | md5 -q).pid"
+	echo "/tmp/symphony-$(echo "$1" | md5 -q).pid"
 }
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -76,77 +121,166 @@ ACTION="${1:-start}"
 PROJECT_ARG="${2:-}"
 
 case "$ACTION" in
-  start|on)
-    PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
-    PIDFILE="$(pidfile_for "$PROJECT_DIR")"
+start | on)
+	PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
+	PIDFILE="$(pidfile_for "$PROJECT_DIR")"
 
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-      echo "Symphony already running for $PROJECT_DIR (pid $(cat "$PIDFILE"))" >&2
-      echo "Use 'symphony stop${PROJECT_ARG:+ $PROJECT_ARG}' first." >&2
-      exit 1
-    fi
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		echo "Symphony already running for $PROJECT_DIR (pid $(cat "$PIDFILE"))" >&2
+		echo "Use 'symphony off${PROJECT_ARG:+ $PROJECT_ARG}' first." >&2
+		exit 1
+	fi
 
-    WORKFLOW_PATH="$(find_workflow "$PROJECT_DIR")"
-    setup_env
-    echo "Symphony starting in: $PROJECT_DIR"
-    echo "Workflow: $WORKFLOW_PATH"
-    cd "$PROJECT_DIR"
-    echo $$ > "$PIDFILE"
-    exec "$SYMPHONY_BIN" "on" "$WORKFLOW_PATH"
-    ;;
+	WORKFLOW_PATH="$(find_workflow "$PROJECT_DIR")"
+	setup_env
 
-  stop|off)
-    PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
-    PIDFILE="$(pidfile_for "$PROJECT_DIR")"
+	# Detect port from --port flag if provided (after project arg)
+	PORT=4000
+	shift 2 2>/dev/null || shift "$#" 2>/dev/null || true
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--port | -p)
+			[[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --port requires a non-flag argument" >&2; exit 1; }
+			PORT="$2"
+			shift 2
+			;;
+		*) shift ;;
+		esac
+	done
 
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-      kill "$(cat "$PIDFILE")"
-      rm -f "$PIDFILE"
-      echo "Symphony stopped for $PROJECT_DIR"
-    else
-      echo "No running Symphony found for $PROJECT_DIR"
-    fi
-    ;;
+	echo "Symphony starting in: $PROJECT_DIR"
+	echo "Workflow: $WORKFLOW_PATH"
+	cd "$PROJECT_DIR"
+	echo $$ >"$PIDFILE"
+	write_instance_json "$$" "$PORT" "$PROJECT_DIR"
+	exec "$SYMPHONY_BIN" "on" "$WORKFLOW_PATH"
+	;;
 
-  status)
-    PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
-    PIDFILE="$(pidfile_for "$PROJECT_DIR")"
+stop | off)
+	# Determine port from instance.json
+	PORT=4000
+	if [ -f "$INSTANCE_FILE" ]; then
+		_inst_port="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('port', 4000))
+except Exception:
+    print(4000)
+" "$INSTANCE_FILE" 2>/dev/null || echo 4000)"
+		PORT="${_inst_port:-4000}"
+	fi
 
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-      echo "Running for $PROJECT_DIR (pid $(cat "$PIDFILE"))"
-    else
-      echo "Not running for $PROJECT_DIR"
-    fi
-    ;;
+	# Try HTTP graceful shutdown first
+	_http_ok=false
+	if curl -sf -X POST "http://127.0.0.1:${PORT}/api/v1/shutdown" \
+		-H "Content-Type: application/json" \
+		-d '{}' \
+		--max-time 5 \
+		-o /dev/null 2>/dev/null; then
+		_http_ok=true
+		echo "Graceful shutdown initiated via HTTP (port ${PORT})"
+		_deadline=$(( $(date +%s) + 35 ))
+		_pid=""
+		if [ -f "$INSTANCE_FILE" ]; then
+			_pid="$(python3 -c "import json; d=json.load(open('$INSTANCE_FILE')); print(d.get('pid',''))" 2>/dev/null || true)"
+		fi
+		while [ "$(date +%s)" -lt "$_deadline" ]; do
+			if [ -z "$_pid" ] || ! kill -0 "$_pid" 2>/dev/null; then
+				echo "Symphony stopped."
+				break
+			fi
+			sleep 1
+		done
+		remove_instance_json
+	fi
 
-  logs)
-    shift  # remove "logs"
-    ISSUE=""
-    FULL=false
-    PORT=4000
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --issue|-i)
-          [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --issue requires a non-flag argument" >&2; exit 1; }
-          ISSUE="$2"; shift 2 ;;
-        --full) FULL=true; shift ;;
-        --port|-p)
-          [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --port requires a non-flag argument" >&2; exit 1; }
-          PORT="$2"; shift 2 ;;
-        *) echo "Usage: symphony logs [--issue <identifier>] [--full] [--port <port>]" >&2; exit 1 ;;
-      esac
-    done
+	# Fallback: SIGTERM via PID from instance.json or pidfile
+	if [ "$_http_ok" = "false" ]; then
+		PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
+		PIDFILE="$(pidfile_for "$PROJECT_DIR")"
+		_pid=""
 
-    BASE_URL="http://127.0.0.1:${PORT}"
+		if [ -f "$INSTANCE_FILE" ]; then
+			_pid="$(python3 -c "import json; d=json.load(open('$INSTANCE_FILE')); print(d.get('pid',''))" 2>/dev/null || true)"
+		fi
+		[ -z "$_pid" ] && [ -f "$PIDFILE" ] && _pid="$(cat "$PIDFILE")"
 
-    if [ -n "$ISSUE" ]; then
-      if $FULL; then
-        # Full history: one-shot GET /api/v1/issues/:id/activity
-        if ! response=$(curl -s "${BASE_URL}/api/v1/issues/${ISSUE}/activity" 2>/dev/null); then
-          echo "Error: Could not connect to Symphony server at ${BASE_URL}" >&2
-          exit 1
-        fi
-        echo "$response" | python3 -c "
+		if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+			kill "$_pid"
+			rm -f "$PIDFILE"
+			remove_instance_json
+			echo "Symphony stopped for $PROJECT_DIR (SIGTERM pid $_pid)"
+		else
+			echo "No running Symphony found (no HTTP endpoint, no PID)"
+		fi
+	fi
+	;;
+
+status)
+	# Prefer instance.json over pidfile
+	if [ -f "$INSTANCE_FILE" ]; then
+		_inst_vars="$(read_instance_json 2>/dev/null)" || _inst_vars=""
+		if [ -n "$_inst_vars" ]; then
+			eval "$_inst_vars"
+			# shellcheck disable=SC2154
+			if [ -n "${inst_pid:-}" ] && kill -0 "$inst_pid" 2>/dev/null; then
+				echo "Running  pid=${inst_pid}  port=${inst_port:-4000}  started=${inst_started_at:-unknown}"
+				echo "Project: ${inst_project_dir:-unknown}"
+				exit 0
+			else
+				echo "Not running (stale instance.json)"
+				remove_instance_json
+				exit 0
+			fi
+		fi
+	fi
+
+	# Legacy fallback: pidfile
+	PROJECT_DIR="$(resolve_project_dir "$PROJECT_ARG")"
+	PIDFILE="$(pidfile_for "$PROJECT_DIR")"
+
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		echo "Running for $PROJECT_DIR (pid $(cat "$PIDFILE"))"
+	else
+		echo "Not running for $PROJECT_DIR"
+	fi
+	;;
+
+logs)
+	shift # remove "logs"
+	ISSUE=""
+	FULL=false
+	PORT=4000
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--issue | -i)
+			[[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --issue requires a non-flag argument" >&2; exit 1; }
+			ISSUE="$2"
+			shift 2
+			;;
+		--full)
+			FULL=true
+			shift
+			;;
+		--port | -p)
+			[[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --port requires a non-flag argument" >&2; exit 1; }
+			PORT="$2"
+			shift 2
+			;;
+		*) echo "Usage: symphony logs [--issue <identifier>] [--full] [--port <port>]" >&2; exit 1 ;;
+		esac
+	done
+
+	BASE_URL="http://127.0.0.1:${PORT}"
+
+	if [ -n "$ISSUE" ]; then
+		if $FULL; then
+			if ! response=$(curl -s "${BASE_URL}/api/v1/issues/${ISSUE}/activity" 2>/dev/null); then
+				echo "Error: Could not connect to Symphony server at ${BASE_URL}" >&2
+				exit 1
+			fi
+			echo "$response" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 items = data.get('items', [])
@@ -159,19 +293,18 @@ else:
         msg = item.get('message', '')
         print(at + '  ' + event + ('  ' + msg if msg else ''))
 "
-      else
-        # Tail: poll /api/v1/issues/:id/activity incrementally
-        echo "Tailing ${ISSUE}... (Ctrl+C to stop)"
-        SINCE=""
-        while true; do
-          URL="${BASE_URL}/api/v1/issues/${ISSUE}/activity"
-          [ -n "$SINCE" ] && URL="${URL}?since=${SINCE}"
-          response=$(curl -sf "$URL" 2>/dev/null) || {
-            echo "Symphony server not responding at ${BASE_URL} (retrying...)" >&2
-            sleep 2; continue
-          }
-          # Print activity items to terminal (separate from SINCE capture to avoid swallowing output)
-          echo "$response" | python3 -c "
+		else
+			echo "Tailing ${ISSUE}... (Ctrl+C to stop)"
+			SINCE=""
+			while true; do
+				URL="${BASE_URL}/api/v1/issues/${ISSUE}/activity"
+				[ -n "$SINCE" ] && URL="${URL}?since=${SINCE}"
+				response=$(curl -sf "$URL" 2>/dev/null) || {
+					echo "Symphony server not responding at ${BASE_URL} (retrying...)" >&2
+					sleep 2
+					continue
+				}
+				echo "$response" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 items = data.get('items', [])
@@ -181,26 +314,25 @@ for item in items:
     msg = item.get('message', '')
     print(at + '  ' + event + ('  ' + msg if msg else ''))
 " 2>/dev/null
-          SINCE=$(echo "$response" | python3 -c "
+				SINCE=$(echo "$response" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 print(data.get('generated_at', ''))
 " 2>/dev/null)
-          sleep 2
-        done
-      fi
-    else
-      # No issue: poll /api/v1/state and display all running agents
-      echo "Tailing all agent activity... (Ctrl+C to stop)"
-      while true; do
-        response=$(curl -sf "${BASE_URL}/api/v1/state" 2>/dev/null) || {
-          echo "Symphony server not responding at ${BASE_URL}" >&2
-          sleep 2
-          continue
-        }
-        clear 2>/dev/null || true
-        echo "=== Symphony Agent Activity === $(date)"
-        echo "$response" | python3 -c "
+				sleep 2
+			done
+		fi
+	else
+		echo "Tailing all agent activity... (Ctrl+C to stop)"
+		while true; do
+			response=$(curl -sf "${BASE_URL}/api/v1/state" 2>/dev/null) || {
+				echo "Symphony server not responding at ${BASE_URL}" >&2
+				sleep 2
+				continue
+			}
+			clear 2>/dev/null || true
+			echo "=== Symphony Agent Activity === $(date)"
+			echo "$response" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 if 'error' in data:
@@ -222,45 +354,45 @@ for r in retrying:
     err = str(r.get('error') or '')
     print('  ' + ident + '  [retrying attempt ' + attempt + ']' + ('  ' + err[:80] if err else ''))
 "
-        sleep 2
-      done
-    fi
-    ;;
+			sleep 2
+		done
+	fi
+	;;
 
-  intervene)
-    shift  # remove "intervene"
-    ISSUE="${1:-}"
-    DIRECTIVE="${2:-}"
-    PORT=4000
-    [ $# -ge 2 ] && shift 2 || shift $# 2>/dev/null || true
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --port|-p)
-          [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --port requires a non-flag argument" >&2; exit 1; }
-          PORT="$2"; shift 2 ;;
-        *) echo "Unknown option: $1" >&2; exit 1 ;;
-      esac
-    done
+intervene)
+	shift # remove "intervene"
+	ISSUE="${1:-}"
+	DIRECTIVE="${2:-}"
+	PORT=4000
+	[ $# -ge 2 ] && shift 2 || shift $# 2>/dev/null || true
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--port | -p)
+			[[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --port requires a non-flag argument" >&2; exit 1; }
+			PORT="$2"
+			shift 2
+			;;
+		*) echo "Unknown option: $1" >&2; exit 1 ;;
+		esac
+	done
 
-    if [ -z "$ISSUE" ] || [ -z "$DIRECTIVE" ]; then
-      echo "Usage: symphony intervene <issue-identifier> <directive> [--port <port>]" >&2
-      exit 1
-    fi
+	if [ -z "$ISSUE" ] || [ -z "$DIRECTIVE" ]; then
+		echo "Usage: symphony intervene <issue-identifier> <directive> [--port <port>]" >&2
+		exit 1
+	fi
 
-    PAYLOAD=$(python3 -c "import json, sys; print(json.dumps({'directive': sys.argv[1]}))" "$DIRECTIVE")
-    # Use mktemp to avoid collisions with concurrent invocations; capture body separately from http_code
-    TMPFILE=$(mktemp)
-    trap 'rm -f "$TMPFILE"' EXIT
-    # Use -s (silent) without -f so HTTP error bodies (4xx/5xx) are still captured for display
-    if ! curl -s -o "$TMPFILE" -X POST \
-      -H "Content-Type: application/json" \
-      -d "$PAYLOAD" \
-      "http://127.0.0.1:${PORT}/api/v1/issues/${ISSUE}/intervene" 2>/dev/null; then
-      echo "Failed to reach Symphony server at port ${PORT}" >&2
-      exit 1
-    fi
-    response=$(cat "$TMPFILE")
-    echo "$response" | python3 -c "
+	PAYLOAD=$(python3 -c "import json, sys; print(json.dumps({'directive': sys.argv[1]}))" "$DIRECTIVE")
+	TMPFILE=$(mktemp)
+	trap 'rm -f "$TMPFILE"' EXIT
+	if ! curl -s -o "$TMPFILE" -X POST \
+		-H "Content-Type: application/json" \
+		-d "$PAYLOAD" \
+		"http://127.0.0.1:${PORT}/api/v1/issues/${ISSUE}/intervene" 2>/dev/null; then
+		echo "Failed to reach Symphony server at port ${PORT}" >&2
+		exit 1
+	fi
+	response=$(cat "$TMPFILE")
+	echo "$response" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -275,10 +407,10 @@ ident = data.get('issue_identifier', '')
 directive = data.get('directive', '')
 print('Directive queued for ' + ident + ': ' + directive)
 "
-    ;;
+	;;
 
-  *)
-    echo "Usage: symphony [on|off|status|logs|intervene] [args]" >&2
-    exit 1
-    ;;
+*)
+	echo "Usage: symphony [on|off|status|logs|intervene] [args]" >&2
+	exit 1
+	;;
 esac
