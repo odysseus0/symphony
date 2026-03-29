@@ -106,10 +106,14 @@ defmodule SymphonyElixirWeb.Presenter do
           stats = Map.get(snapshot, :stats) || %{}
           all_turns = Map.get(stats, :per_turn_tokens, [])
 
+          current_session_id = running.session_id
+
           issue_turns =
             Enum.filter(all_turns, fn turn ->
-              Map.get(turn, :issue_identifier) == issue_identifier or
-                Map.get(turn, "issue_identifier") == issue_identifier
+              (Map.get(turn, :issue_identifier) == issue_identifier or
+                 Map.get(turn, "issue_identifier") == issue_identifier) and
+                (Map.get(turn, :session_id) == current_session_id or
+                   Map.get(turn, "session_id") == current_session_id)
             end)
 
           payload = %{

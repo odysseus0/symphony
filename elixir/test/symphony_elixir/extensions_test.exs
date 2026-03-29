@@ -606,20 +606,26 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert json_response(get(build_conn(), "/api/v1/issues/MT-MISSING/tokens"), 404) ==
              %{"error" => %{"code" => "issue_not_found", "message" => "Issue not found"}}
 
-    # POST /api/v1/issues/:id/intervene — with message returns 202
+    # POST /api/v1/issues/:id/intervene — with directive returns 202
     intervene =
       json_response(
-        post(build_conn(), "/api/v1/issues/MT-HTTP/intervene", %{"message" => "please stop"}),
+        post(build_conn(), "/api/v1/issues/MT-HTTP/intervene", %{"directive" => "please stop"}),
         202
       )
 
     assert intervene["issue_identifier"] == "MT-HTTP"
     assert intervene["status"] == "queued"
-    assert intervene["message"] == "please stop"
+    assert intervene["directive"] == "please stop"
 
-    # POST /api/v1/issues/:id/intervene — without message returns 422
+    # POST /api/v1/issues/:id/intervene — missing directive returns 422
     assert json_response(post(build_conn(), "/api/v1/issues/MT-HTTP/intervene", %{}), 422) ==
-             %{"error" => %{"code" => "message_required", "message" => "message is required"}}
+             %{"error" => %{"code" => "directive_required", "message" => "directive must be a non-empty string"}}
+
+    # POST /api/v1/issues/:id/intervene — empty directive returns 422
+    assert json_response(
+             post(build_conn(), "/api/v1/issues/MT-HTTP/intervene", %{"directive" => "  "}),
+             422
+           ) == %{"error" => %{"code" => "directive_required", "message" => "directive must be a non-empty string"}}
 
     # Method not allowed for new routes
     assert json_response(post(build_conn(), "/api/v1/issues/completed", %{}), 405) ==

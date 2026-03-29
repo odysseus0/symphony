@@ -65,12 +65,18 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec issue_intervene(Conn.t(), map()) :: Conn.t()
   def issue_intervene(conn, %{"id" => id} = params) do
-    message = params |> Map.get("message", "") |> to_string() |> String.trim()
+    raw = Map.get(params, "directive")
 
-    if message == "" do
-      error_response(conn, 422, "message_required", "message is required")
-    else
-      conn |> put_status(202) |> json(%{issue_identifier: id, status: "queued", message: message})
+    cond do
+      not is_binary(raw) ->
+        error_response(conn, 422, "directive_required", "directive must be a non-empty string")
+
+      String.trim(raw) == "" ->
+        error_response(conn, 422, "directive_required", "directive must be a non-empty string")
+
+      true ->
+        directive = String.trim(raw)
+        conn |> put_status(202) |> json(%{issue_identifier: id, status: "queued", directive: directive})
     end
   end
 
