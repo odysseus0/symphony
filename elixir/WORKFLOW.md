@@ -20,8 +20,9 @@ workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 git@github.com:Bububuger/spanory.git .
-    npm ci
+    git clone --depth 1 git@github.com:Bububuger/symphony.git .
+    cd elixir && mise trust
+    mise exec -- mix deps.get
     cat > progress.txt << 'PROGRESS'
     # Codex Progress Log
     Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)

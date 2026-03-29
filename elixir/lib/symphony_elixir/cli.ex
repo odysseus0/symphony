@@ -8,6 +8,7 @@ defmodule SymphonyElixir.CLI do
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
+  @default_consent_file "~/.config/symphony/.consented"
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
@@ -16,7 +17,10 @@ defmodule SymphonyElixir.CLI do
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
           run_dynamic_tools_mcp: ([String.t()] -> :ok | {:error, String.t()}),
-          ensure_all_started: (-> ensure_started_result())
+          ensure_all_started: (-> ensure_started_result()),
+          consent_file_path: String.t(),
+          write_consent: (String.t() -> :ok),
+          ask_for_consent: (-> boolean())
         }
 
   @spec main([String.t()]) :: no_return()
@@ -29,19 +33,49 @@ defmodule SymphonyElixir.CLI do
       :ok ->
         wait_for_shutdown()
 
+      {:ok, :no_wait} ->
+        :ok
+
       {:error, message} ->
         IO.puts(:stderr, message)
         System.halt(1)
     end
   end
 
-  @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
+  @spec evaluate([String.t()], deps()) :: :ok | {:ok, :no_wait} | {:error, String.t()}
   def evaluate(args, deps \\ runtime_deps())
 
   def evaluate(["dynamic-tools-mcp" | rest], deps) do
     deps.run_dynamic_tools_mcp.(rest)
   end
 
+  def evaluate(["on" | rest], deps) do
+    case OptionParser.parse(rest, strict: @switches) do
+      {opts, [], []} ->
+        with :ok <- require_consent(opts, deps),
+             :ok <- maybe_set_logs_root(opts, deps),
+             :ok <- maybe_set_server_port(opts, deps) do
+          run(Path.expand("WORKFLOW.md"), deps)
+        end
+
+      {opts, [workflow_path], []} ->
+        with :ok <- require_consent(opts, deps),
+             :ok <- maybe_set_logs_root(opts, deps),
+             :ok <- maybe_set_server_port(opts, deps) do
+          run(workflow_path, deps)
+        end
+
+      _ ->
+        {:error, usage_message()}
+    end
+  end
+
+  def evaluate(["off" | _rest], _deps), do: {:ok, :no_wait}
+  def evaluate(["status" | _rest], _deps), do: {:ok, :no_wait}
+  def evaluate(["init" | _rest], _deps), do: {:ok, :no_wait}
+  def evaluate(["doctor" | _rest], _deps), do: {:ok, :no_wait}
+
+  # Backward-compatible: old-style invocation with guardrail flag (CI/scripts)
   def evaluate(args, deps) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
@@ -86,8 +120,15 @@ defmodule SymphonyElixir.CLI do
   defp usage_message do
     """
     Usage:
-      symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]
+      symphony on [path-to-WORKFLOW.md] [--logs-root <path>] [--port <port>]
+      symphony off
+      symphony status
+      symphony init
+      symphony doctor
       symphony dynamic-tools-mcp [--linear-api-key <token>] [--linear-endpoint <url>]
+
+    Legacy (CI/scripts):
+      symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md] --i-understand-that-this-will-be-running-without-the-usual-guardrails
     """
     |> String.trim()
   end
@@ -100,8 +141,35 @@ defmodule SymphonyElixir.CLI do
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       run_dynamic_tools_mcp: &MCPServer.run_cli/1,
-      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
+      ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end,
+      consent_file_path: Path.expand(@default_consent_file),
+      write_consent: &write_consent/1,
+      ask_for_consent: &ask_for_consent/0
     }
+  end
+
+  defp require_consent(opts, deps) do
+    cond do
+      Keyword.get(opts, @acknowledgement_switch, false) ->
+        :ok
+
+      deps.file_regular?.(deps.consent_file_path) ->
+        :ok
+
+      deps.ask_for_consent.() ->
+        deps.write_consent.(deps.consent_file_path)
+
+      true ->
+        {:error, acknowledgement_banner()}
+    end
+  end
+
+  defp require_guardrails_acknowledgement(opts) do
+    if Keyword.get(opts, @acknowledgement_switch, false) do
+      :ok
+    else
+      {:error, acknowledgement_banner()}
+    end
   end
 
   defp maybe_set_logs_root(opts, deps) do
@@ -120,11 +188,19 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  defp require_guardrails_acknowledgement(opts) do
-    if Keyword.get(opts, @acknowledgement_switch, false) do
-      :ok
-    else
-      {:error, acknowledgement_banner()}
+  defp maybe_set_server_port(opts, deps) do
+    case Keyword.get_values(opts, :port) do
+      [] ->
+        :ok
+
+      values ->
+        port = List.last(values)
+
+        if is_integer(port) and port >= 0 do
+          :ok = deps.set_server_port_override.(port)
+        else
+          {:error, usage_message()}
+        end
     end
   end
 
@@ -166,19 +242,19 @@ defmodule SymphonyElixir.CLI do
     :ok
   end
 
-  defp maybe_set_server_port(opts, deps) do
-    case Keyword.get_values(opts, :port) do
-      [] ->
-        :ok
+  defp write_consent(path) do
+    path |> Path.dirname() |> File.mkdir_p!()
+    File.write!(path, "")
+    :ok
+  end
 
-      values ->
-        port = List.last(values)
+  defp ask_for_consent do
+    IO.puts(acknowledgement_banner())
+    IO.write("\nType YES to proceed: ")
 
-        if is_integer(port) and port >= 0 do
-          :ok = deps.set_server_port_override.(port)
-        else
-          {:error, usage_message()}
-        end
+    case IO.gets("") do
+      line when is_binary(line) -> String.trim(line) == "YES"
+      _ -> false
     end
   end
 

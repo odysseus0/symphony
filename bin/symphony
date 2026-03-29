@@ -9,7 +9,7 @@
 #   symphony status [project]   # check if running
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0")")/.." && pwd)"
 SYMPHONY_BIN="${SCRIPT_DIR}/elixir/bin/symphony"
 GUARDRAIL_FLAG="--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 PROJECTS_ROOT="/Users/javis/Documents/workspace/projects"
@@ -30,16 +30,12 @@ resolve_project_dir() {
 
   if [ -z "$project" ]; then
     # No argument — use current directory
-    if [ ! -f WORKFLOW.md ]; then
-      echo "No WORKFLOW.md in current directory: $PWD" >&2
-      exit 1
-    fi
     echo "$PWD"
     return
   fi
 
   # Try exact path, then common locations
-  if [ -d "$project" ] && [ -f "$project/WORKFLOW.md" ]; then
+  if [ -d "$project" ]; then
     echo "$(cd "$project" && pwd)"
   elif [ -d "$PROJECTS_ROOT/$project" ]; then
     echo "$PROJECTS_ROOT/$project"
@@ -48,6 +44,24 @@ resolve_project_dir() {
   else
     echo "Project not found: $project" >&2
     echo "Searched: $project, $PROJECTS_ROOT/$project, $PROJECTS_ROOT/${project}-all/$project" >&2
+    exit 1
+  fi
+}
+
+# ── Find WORKFLOW.md in project directory ────────────────────────────────────
+find_workflow() {
+  local dir="$1"
+  # Direct match first, then one level deep
+  if [ -f "$dir/WORKFLOW.md" ]; then
+    echo "$dir/WORKFLOW.md"
+  else
+    for candidate in "$dir"/*/WORKFLOW.md; do
+      if [ -f "$candidate" ]; then
+        echo "$candidate"
+        return
+      fi
+    done
+    echo "No WORKFLOW.md found in $dir or its immediate subdirectories" >&2
     exit 1
   fi
 }
@@ -72,11 +86,13 @@ case "$ACTION" in
       exit 1
     fi
 
+    WORKFLOW_PATH="$(find_workflow "$PROJECT_DIR")"
     setup_env
     echo "Symphony starting in: $PROJECT_DIR"
+    echo "Workflow: $WORKFLOW_PATH"
     cd "$PROJECT_DIR"
     echo $$ > "$PIDFILE"
-    exec "$SYMPHONY_BIN" "$GUARDRAIL_FLAG"
+    exec "$SYMPHONY_BIN" "on" "$WORKFLOW_PATH"
     ;;
 
   stop|off)
