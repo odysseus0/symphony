@@ -42,6 +42,38 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @spec completed_issues(Conn.t(), map()) :: Conn.t()
+  def completed_issues(conn, _params) do
+    generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    json(conn, %{items: [], generated_at: generated_at})
+  end
+
+  @spec issue_activity(Conn.t(), map()) :: Conn.t()
+  def issue_activity(conn, %{"id" => id} = params) do
+    since = Map.get(params, "since")
+    generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    json(conn, %{issue_identifier: id, items: [], has_more: false, since: since, generated_at: generated_at})
+  end
+
+  @spec issue_tokens(Conn.t(), map()) :: Conn.t()
+  def issue_tokens(conn, %{"id" => id}) do
+    case Presenter.issue_tokens_payload(id, orchestrator(), snapshot_timeout_ms()) do
+      {:ok, payload} -> json(conn, payload)
+      {:error, :issue_not_found} -> error_response(conn, 404, "issue_not_found", "Issue not found")
+    end
+  end
+
+  @spec issue_intervene(Conn.t(), map()) :: Conn.t()
+  def issue_intervene(conn, %{"id" => id} = params) do
+    message = params |> Map.get("message", "") |> to_string() |> String.trim()
+
+    if message == "" do
+      error_response(conn, 422, "message_required", "message is required")
+    else
+      conn |> put_status(202) |> json(%{issue_identifier: id, status: "queued", message: message})
+    end
+  end
+
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
   def method_not_allowed(conn, _params) do
     error_response(conn, 405, "method_not_allowed", "Method not allowed")

@@ -94,6 +94,48 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
+  @spec issue_tokens_payload(String.t(), GenServer.name(), timeout()) ::
+          {:ok, map()} | {:error, :issue_not_found}
+  def issue_tokens_payload(issue_identifier, orchestrator, snapshot_timeout_ms)
+      when is_binary(issue_identifier) do
+    case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
+      %{} = snapshot ->
+        running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
+
+        if running do
+          stats = Map.get(snapshot, :stats) || %{}
+          all_turns = Map.get(stats, :per_turn_tokens, [])
+
+          issue_turns =
+            Enum.filter(all_turns, fn turn ->
+              Map.get(turn, :issue_identifier) == issue_identifier or
+                Map.get(turn, "issue_identifier") == issue_identifier
+            end)
+
+          payload = %{
+            issue_identifier: issue_identifier,
+            issue_id: running.issue_id,
+            generated_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+            session_id: running.session_id,
+            turn_count: Map.get(running, :turn_count, 0),
+            total: %{
+              input_tokens: running.codex_input_tokens,
+              output_tokens: running.codex_output_tokens,
+              total_tokens: running.codex_total_tokens
+            },
+            turns: Enum.map(issue_turns, &turn_payload/1)
+          }
+
+          {:ok, payload}
+        else
+          {:error, :issue_not_found}
+        end
+
+      _ ->
+        {:error, :issue_not_found}
+    end
+  end
+
   @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
   def refresh_payload(orchestrator) do
     case Orchestrator.request_refresh(orchestrator) do
@@ -125,6 +167,17 @@ defmodule SymphonyElixirWeb.Presenter do
       recent_events: (running && recent_events_payload(running)) || [],
       last_error: retry && retry.error,
       tracked: %{}
+    }
+  end
+
+  defp turn_payload(turn) do
+    %{
+      session_id: Map.get(turn, :session_id) || Map.get(turn, "session_id"),
+      turn_count: Map.get(turn, :turn_count) || Map.get(turn, "turn_count"),
+      input_tokens: Map.get(turn, :input_tokens) || Map.get(turn, "input_tokens"),
+      output_tokens: Map.get(turn, :output_tokens) || Map.get(turn, "output_tokens"),
+      total_tokens: Map.get(turn, :total_tokens) || Map.get(turn, "total_tokens"),
+      recorded_at: iso8601(Map.get(turn, :recorded_at) || Map.get(turn, "recorded_at"))
     }
   end
 
