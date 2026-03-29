@@ -251,7 +251,11 @@ defmodule SymphonyElixir.CLI do
   defp ask_for_consent do
     IO.puts(acknowledgement_banner())
     IO.write("\nType YES to proceed: ")
-    String.trim(IO.gets("")) == "YES"
+
+    case IO.gets("") do
+      line when is_binary(line) -> String.trim(line) == "YES"
+      _ -> false
+    end
   end
 
   defp set_server_port_override(port) when is_integer(port) and port >= 0 do

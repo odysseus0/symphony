@@ -92,7 +92,7 @@ case "$ACTION" in
     echo "Workflow: $WORKFLOW_PATH"
     cd "$PROJECT_DIR"
     echo $$ > "$PIDFILE"
-    exec "$SYMPHONY_BIN" "$GUARDRAIL_FLAG" "$WORKFLOW_PATH"
+    exec "$SYMPHONY_BIN" "on" "$WORKFLOW_PATH"
     ;;
 
   stop|off)
