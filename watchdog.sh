@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED: This script is superseded by the Orchestrator's built-in stall
+# detection and rate-limit circuit-breaker logic (BUB-200).
+# - Stall detection: Orchestrator.reconcile_stalled_running_issues/1
+# - Rate-limit detection: Orchestrator.check_rate_limit_circuit_breaker/3
+# This file is kept for reference only and is no longer required.
+#
 # Symphony Watchdog — detect rate limit recovery and restart Symphony.
 # Runs periodically via launchd. Does nothing when rate-limited.
 set -euo pipefail
