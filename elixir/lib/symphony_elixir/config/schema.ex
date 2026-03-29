@@ -507,8 +507,161 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     runtimes = finalize_runtimes(settings.runtimes, codex)
+    hooks = finalize_hooks(settings.hooks)
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex, runtimes: runtimes}
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, runtimes: runtimes, hooks: hooks}
+  end
+
+  # ── zero-config hook defaults ────────────────────────────────────────────────
+
+  @default_before_run "git fetch origin main && git merge origin/main --no-edit || true"
+
+  defp finalize_hooks(%Hooks{} = hooks) do
+    # YAML literal block scalars add a trailing newline; strip it for cleaner hook values
+    before_run =
+      case hooks.before_run do
+        nil -> @default_before_run
+        val -> String.trim_trailing(val, "\n")
+      end
+
+    after_create =
+      case hooks.after_create do
+        nil -> derive_after_create()
+        val -> String.trim_trailing(val, "\n")
+      end
+
+    %{hooks | before_run: before_run, after_create: after_create}
+  end
+
+  defp finalize_hooks(hooks), do: hooks
+
+  # Derive a minimal after_create hook from the current project's git remote
+  # and detected lockfiles. Returns nil if the project root cannot be found.
+  defp derive_after_create do
+    path = SymphonyElixir.Workflow.workflow_file_path()
+    workflow_dir = Path.dirname(path)
+
+    with {:ok, project_dir} <- find_project_dir(),
+         {:ok, remote_url} <- read_git_remote_url(project_dir) do
+      # Search workflow dir first (handles subdirectory layouts like elixir/WORKFLOW.md),
+      # then fall back to git root
+      install_cmd = detect_install_command(workflow_dir) || detect_install_command(project_dir)
+
+      if install_cmd do
+        "git clone #{remote_url} .\n#{install_cmd}"
+      else
+        "git clone #{remote_url} ."
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  # Walk up from the WORKFLOW.md directory to find the git root
+  defp find_project_dir do
+    path = SymphonyElixir.Workflow.workflow_file_path()
+    start_dir = Path.dirname(path)
+    find_git_root(start_dir)
+  end
+
+  defp find_git_root(dir) do
+    git_path = Path.join(dir, ".git")
+
+    cond do
+      # Handles both standard repos (.git dir) and worktrees/submodules (.git file)
+      File.exists?(git_path) ->
+        {:ok, dir}
+
+      dir == "/" ->
+        :error
+
+      true ->
+        find_git_root(Path.dirname(dir))
+    end
+  end
+
+  defp read_git_remote_url(project_dir) do
+    git_path = Path.join(project_dir, ".git")
+
+    config_path =
+      cond do
+        File.dir?(git_path) ->
+          Path.join([project_dir, ".git", "config"])
+
+        File.regular?(git_path) ->
+          # Worktree/submodule: .git file contains "gitdir: <path>"
+          with {:ok, content} <- File.read(git_path),
+               [gitdir] <- Regex.run(~r/gitdir:\s*(\S+)/, content, capture: :all_but_first) do
+            real = Path.expand(String.trim(gitdir), project_dir)
+            # Worktree gitdir is .git/worktrees/<name>; main .git is 2 levels up
+            if String.contains?(real, "/worktrees/"),
+              do: real |> Path.dirname() |> Path.dirname() |> Path.join("config"),
+              else: Path.join(real, "config")
+          else
+            _ -> nil
+          end
+
+        true ->
+          nil
+      end
+
+    with path when is_binary(path) <- config_path,
+         {:ok, content} <- File.read(path),
+         {:ok, url} <- parse_git_remote_origin(content) do
+      {:ok, url}
+    else
+      _ -> :error
+    end
+  end
+
+  defp parse_git_remote_origin(content) do
+    # Look for the [remote "origin"] section and extract the url line
+    in_origin_section =
+      content
+      |> String.split("\n")
+      |> Enum.reduce({false, nil}, fn line, {in_section, found_url} ->
+        trimmed = String.trim(line)
+
+        cond do
+          found_url != nil ->
+            {in_section, found_url}
+
+          trimmed == ~s([remote "origin"]) ->
+            {true, nil}
+
+          String.starts_with?(trimmed, "[") and in_section ->
+            {false, nil}
+
+          in_section and String.starts_with?(trimmed, "url =") ->
+            url = trimmed |> String.split("=", parts: 2) |> List.last() |> String.trim()
+            {true, url}
+
+          true ->
+            {in_section, nil}
+        end
+      end)
+
+    case in_origin_section do
+      {_, url} when is_binary(url) and url != "" -> {:ok, url}
+      _ -> :error
+    end
+  end
+
+  @lockfile_commands [
+    {"mix.lock", "mix deps.get"},
+    {"package-lock.json", "npm ci"},
+    {"yarn.lock", "yarn install --frozen-lockfile"},
+    {"bun.lockb", "bun install"},
+    {"pnpm-lock.yaml", "pnpm install --frozen-lockfile"},
+    {"Gemfile.lock", "bundle install"},
+    {"Cargo.lock", "cargo build --release"},
+    {"go.sum", "go mod download"}
+  ]
+
+  defp detect_install_command(project_dir) do
+    Enum.find_value(@lockfile_commands, fn {lockfile, cmd} ->
+      if File.exists?(Path.join(project_dir, lockfile)), do: cmd
+    end)
   end
 
   defp finalize_runtimes([], codex) do

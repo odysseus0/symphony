@@ -1633,4 +1633,101 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.team_key == "ENG"
     assert config.tracker.project_slug == "my-project"
   end
+
+  # -- Zero-config hook defaults --
+
+  test "hooks.before_run defaults to git-pull command when not set in WORKFLOW.md" do
+    write_workflow_file!(Workflow.workflow_file_path(), hook_before_run: nil)
+    config = Config.settings!()
+    assert config.hooks.before_run == "git fetch origin main && git merge origin/main --no-edit || true"
+  end
+
+  test "hooks.before_run is preserved when explicitly set in WORKFLOW.md" do
+    custom_cmd = "echo 'custom before_run'"
+    write_workflow_file!(Workflow.workflow_file_path(), hook_before_run: custom_cmd)
+    config = Config.settings!()
+    assert config.hooks.before_run == custom_cmd
+  end
+
+  test "hooks.after_create is nil when workflow file is not in a git repo" do
+    # TestSupport places WORKFLOW.md in a system temp dir which has no .git ancestor
+    write_workflow_file!(Workflow.workflow_file_path(), hook_after_create: nil)
+    config = Config.settings!()
+    assert config.hooks.after_create == nil
+  end
+
+  test "hooks.after_create is preserved when explicitly set in WORKFLOW.md" do
+    custom_cmd = "git clone git@github.com:example/repo.git ."
+    write_workflow_file!(Workflow.workflow_file_path(), hook_after_create: custom_cmd)
+    config = Config.settings!()
+    assert config.hooks.after_create == custom_cmd
+  end
+
+  test "hooks.after_create is derived from git remote when workflow is inside a git repo" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-git-derive-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      # Set up a fake git repo with a remote origin
+      git_dir = Path.join(test_root, ".git")
+      File.mkdir_p!(git_dir)
+
+      git_config = """
+      [core]
+        repositoryformatversion = 0
+      [remote "origin"]
+        url = git@github.com:example/myrepo.git
+        fetch = +refs/heads/*:refs/remotes/origin/*
+      """
+
+      File.write!(Path.join(git_dir, "config"), git_config)
+
+      workflow_file = Path.join(test_root, "WORKFLOW.md")
+      write_workflow_file!(workflow_file, hook_after_create: nil)
+      Workflow.set_workflow_file_path(workflow_file)
+      SymphonyElixir.WorkflowStore.force_reload()
+
+      config = Config.settings!()
+      assert config.hooks.after_create == "git clone git@github.com:example/myrepo.git ."
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "hooks.after_create includes install command when lockfile is detected" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-git-lockfile-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      git_dir = Path.join(test_root, ".git")
+      File.mkdir_p!(git_dir)
+
+      git_config = """
+      [remote "origin"]
+        url = https://github.com/example/elixir-app.git
+      """
+
+      File.write!(Path.join(git_dir, "config"), git_config)
+      # Add a mix.lock to trigger the Elixir install command
+      File.write!(Path.join(test_root, "mix.lock"), "")
+
+      workflow_file = Path.join(test_root, "WORKFLOW.md")
+      write_workflow_file!(workflow_file, hook_after_create: nil)
+      Workflow.set_workflow_file_path(workflow_file)
+      SymphonyElixir.WorkflowStore.force_reload()
+
+      config = Config.settings!()
+
+      assert config.hooks.after_create ==
+               "git clone https://github.com/example/elixir-app.git .\nmix deps.get"
+    after
+      File.rm_rf(test_root)
+    end
+  end
 end
