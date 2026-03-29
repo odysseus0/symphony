@@ -773,6 +773,62 @@ defmodule SymphonyElixir.ExtensionsTest do
     end)
   end
 
+  test "issue detail liveview renders running issue with tokens and intervene form" do
+    orchestrator_name = Module.concat(__MODULE__, :DetailOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{queued: false, coalesced: false, requested_at: DateTime.utc_now(), operations: []}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/dashboard/issues/MT-HTTP")
+
+    assert html =~ "MT-HTTP"
+    assert html =~ "← Operations Dashboard"
+    assert html =~ "Intervene"
+    assert html =~ "Activity timeline"
+    assert html =~ "Queue directive"
+    assert html =~ "4"
+    assert html =~ "8"
+    assert html =~ "12"
+    refute html =~ "Issue not active"
+
+    # Intervene: empty directive shows error flash
+    view
+    |> element("form[phx-submit=intervene]")
+    |> render_submit(%{directive: ""})
+
+    assert render(view) =~ "Directive cannot be empty"
+
+    # Intervene: valid directive shows success flash
+    view
+    |> element("form[phx-submit=intervene]")
+    |> render_submit(%{directive: "stop and use middleware"})
+
+    assert render(view) =~ "Directive queued"
+  end
+
+  test "issue detail liveview renders not-found state for inactive issue" do
+    orchestrator_name = Module.concat(__MODULE__, :DetailMissingOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{queued: false, coalesced: false, requested_at: DateTime.utc_now(), operations: []}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/dashboard/issues/MT-MISSING")
+    assert html =~ "MT-MISSING"
+    assert html =~ "not currently running"
+  end
+
   test "dashboard liveview renders an unavailable state without crashing" do
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),
