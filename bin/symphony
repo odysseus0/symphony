@@ -119,8 +119,166 @@ case "$ACTION" in
     fi
     ;;
 
+  logs)
+    shift  # remove "logs"
+    ISSUE=""
+    FULL=false
+    PORT=4000
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --issue|-i)
+          [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --issue requires a non-flag argument" >&2; exit 1; }
+          ISSUE="$2"; shift 2 ;;
+        --full) FULL=true; shift ;;
+        --port|-p)
+          [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --port requires a non-flag argument" >&2; exit 1; }
+          PORT="$2"; shift 2 ;;
+        *) echo "Usage: symphony logs [--issue <identifier>] [--full] [--port <port>]" >&2; exit 1 ;;
+      esac
+    done
+
+    BASE_URL="http://127.0.0.1:${PORT}"
+
+    if [ -n "$ISSUE" ]; then
+      if $FULL; then
+        # Full history: one-shot GET /api/v1/issues/:id/activity
+        if ! response=$(curl -s "${BASE_URL}/api/v1/issues/${ISSUE}/activity" 2>/dev/null); then
+          echo "Error: Could not connect to Symphony server at ${BASE_URL}" >&2
+          exit 1
+        fi
+        echo "$response" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data.get('items', [])
+if not items:
+    print('No activity recorded yet for ' + data.get('issue_identifier', ''))
+else:
+    for item in items:
+        at = item.get('at', '')
+        event = item.get('event', '')
+        msg = item.get('message', '')
+        print(at + '  ' + event + ('  ' + msg if msg else ''))
+"
+      else
+        # Tail: poll /api/v1/issues/:id/activity incrementally
+        echo "Tailing ${ISSUE}... (Ctrl+C to stop)"
+        SINCE=""
+        while true; do
+          URL="${BASE_URL}/api/v1/issues/${ISSUE}/activity"
+          [ -n "$SINCE" ] && URL="${URL}?since=${SINCE}"
+          response=$(curl -sf "$URL" 2>/dev/null) || {
+            echo "Symphony server not responding at ${BASE_URL} (retrying...)" >&2
+            sleep 2; continue
+          }
+          # Print activity items to terminal (separate from SINCE capture to avoid swallowing output)
+          echo "$response" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data.get('items', [])
+for item in items:
+    at = item.get('at', '')
+    event = item.get('event', '')
+    msg = item.get('message', '')
+    print(at + '  ' + event + ('  ' + msg if msg else ''))
+" 2>/dev/null
+          SINCE=$(echo "$response" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print(data.get('generated_at', ''))
+" 2>/dev/null)
+          sleep 2
+        done
+      fi
+    else
+      # No issue: poll /api/v1/state and display all running agents
+      echo "Tailing all agent activity... (Ctrl+C to stop)"
+      while true; do
+        response=$(curl -sf "${BASE_URL}/api/v1/state" 2>/dev/null) || {
+          echo "Symphony server not responding at ${BASE_URL}" >&2
+          sleep 2
+          continue
+        }
+        clear 2>/dev/null || true
+        echo "=== Symphony Agent Activity === $(date)"
+        echo "$response" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if 'error' in data:
+    print('  Error: ' + str(data['error']))
+    sys.exit(0)
+running = data.get('running', [])
+retrying = data.get('retrying', [])
+if not running and not retrying:
+    print('  No active issues')
+for r in running:
+    ident = r.get('issue_identifier', '?')
+    state = r.get('state', '?')
+    turns = str(r.get('turn_count', 0))
+    last = r.get('last_message') or str(r.get('last_event') or '')
+    print('  ' + ident + '  [' + state + ']  turn ' + turns + ('  ' + last[:80] if last else ''))
+for r in retrying:
+    ident = r.get('issue_identifier', '?')
+    attempt = str(r.get('attempt', 0))
+    err = str(r.get('error') or '')
+    print('  ' + ident + '  [retrying attempt ' + attempt + ']' + ('  ' + err[:80] if err else ''))
+"
+        sleep 2
+      done
+    fi
+    ;;
+
+  intervene)
+    shift  # remove "intervene"
+    ISSUE="${1:-}"
+    DIRECTIVE="${2:-}"
+    PORT=4000
+    [ $# -ge 2 ] && shift 2 || shift $# 2>/dev/null || true
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --port|-p)
+          [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "Error: --port requires a non-flag argument" >&2; exit 1; }
+          PORT="$2"; shift 2 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+      esac
+    done
+
+    if [ -z "$ISSUE" ] || [ -z "$DIRECTIVE" ]; then
+      echo "Usage: symphony intervene <issue-identifier> <directive> [--port <port>]" >&2
+      exit 1
+    fi
+
+    PAYLOAD=$(python3 -c "import json, sys; print(json.dumps({'directive': sys.argv[1]}))" "$DIRECTIVE")
+    # Use mktemp to avoid collisions with concurrent invocations; capture body separately from http_code
+    TMPFILE=$(mktemp)
+    trap 'rm -f "$TMPFILE"' EXIT
+    # Use -s (silent) without -f so HTTP error bodies (4xx/5xx) are still captured for display
+    if ! curl -s -o "$TMPFILE" -X POST \
+      -H "Content-Type: application/json" \
+      -d "$PAYLOAD" \
+      "http://127.0.0.1:${PORT}/api/v1/issues/${ISSUE}/intervene" 2>/dev/null; then
+      echo "Failed to reach Symphony server at port ${PORT}" >&2
+      exit 1
+    fi
+    response=$(cat "$TMPFILE")
+    echo "$response" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print('Unexpected response from server', file=sys.stderr)
+    sys.exit(1)
+if 'error' in data:
+    err = data['error']
+    print('Error: ' + str(err.get('message', err)), file=sys.stderr)
+    sys.exit(1)
+ident = data.get('issue_identifier', '')
+directive = data.get('directive', '')
+print('Directive queued for ' + ident + ': ' + directive)
+"
+    ;;
+
   *)
-    echo "Usage: symphony [on|off|status] [project-name]" >&2
+    echo "Usage: symphony [on|off|status|logs|intervene] [args]" >&2
     exit 1
     ;;
 esac
