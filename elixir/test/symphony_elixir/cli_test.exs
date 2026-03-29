@@ -5,10 +5,9 @@ defmodule SymphonyElixir.CLITest do
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
-  test "routes dynamic-tools-mcp subcommand without guardrails acknowledgement" do
-    parent = self()
-
-    deps = %{
+  # Base deps without consent fields (for backward-compat tests that don't need them)
+  defp base_deps(parent) do
+    %{
       file_regular?: fn _path ->
         send(parent, :file_checked)
         true
@@ -34,6 +33,36 @@ defmodule SymphonyElixir.CLITest do
         {:ok, [:symphony_elixir]}
       end
     }
+  end
+
+  defp on_deps(parent, consent_exists?) do
+    base_deps(parent)
+    |> Map.merge(%{
+      consent_file_path: "/tmp/test-symphony-consent",
+      write_consent: fn _path ->
+        send(parent, :consent_written)
+        :ok
+      end,
+      ask_for_consent: fn ->
+        send(parent, :consent_asked)
+        false
+      end,
+      file_regular?: fn path ->
+        if path == "/tmp/test-symphony-consent" do
+          consent_exists?
+        else
+          send(parent, {:file_checked, path})
+          true
+        end
+      end
+    })
+  end
+
+  # ── dynamic-tools-mcp ─────────────────────────────────────────────────────
+
+  test "routes dynamic-tools-mcp subcommand without guardrails acknowledgement" do
+    parent = self()
+    deps = base_deps(parent)
 
     assert :ok =
              CLI.evaluate(
@@ -50,31 +79,97 @@ defmodule SymphonyElixir.CLITest do
     refute_received :started
   end
 
-  test "returns the guardrails acknowledgement banner when the flag is missing" do
+  # ── on subcommand ─────────────────────────────────────────────────────────
+
+  test "on: starts when consent file exists" do
+    parent = self()
+    deps = on_deps(parent, true)
+
+    assert :ok = CLI.evaluate(["on", "WORKFLOW.md"], deps)
+    assert_received :started
+    refute_received :consent_asked
+    refute_received :consent_written
+  end
+
+  test "on: starts when ack flag provided (CI path), writes no consent" do
+    parent = self()
+    deps = on_deps(parent, false)
+
+    assert :ok = CLI.evaluate(["on", @ack_flag, "WORKFLOW.md"], deps)
+    assert_received :started
+    refute_received :consent_asked
+    refute_received :consent_written
+  end
+
+  test "on: asks for consent when no consent file, user says YES → writes consent and starts" do
     parent = self()
 
-    deps = %{
-      file_regular?: fn _path ->
-        send(parent, :file_checked)
+    deps =
+      on_deps(parent, false)
+      |> Map.put(:ask_for_consent, fn ->
+        send(parent, :consent_asked)
         true
-      end,
-      set_workflow_file_path: fn _path ->
-        send(parent, :workflow_set)
-        :ok
-      end,
-      set_logs_root: fn _path ->
-        send(parent, :logs_root_set)
-        :ok
-      end,
-      set_server_port_override: fn _port ->
-        send(parent, :port_set)
-        :ok
-      end,
-      ensure_all_started: fn ->
-        send(parent, :started)
-        {:ok, [:symphony_elixir]}
-      end
-    }
+      end)
+
+    assert :ok = CLI.evaluate(["on", "WORKFLOW.md"], deps)
+    assert_received :consent_asked
+    assert_received :consent_written
+    assert_received :started
+  end
+
+  test "on: returns banner when no consent file and user says NO" do
+    parent = self()
+    deps = on_deps(parent, false)
+
+    assert {:error, banner} = CLI.evaluate(["on", "WORKFLOW.md"], deps)
+    assert banner =~ "This Symphony implementation is a low key engineering preview."
+    assert_received :consent_asked
+    refute_received :consent_written
+    refute_received :started
+  end
+
+  test "on: defaults to WORKFLOW.md when no path given" do
+    parent = self()
+
+    deps =
+      on_deps(parent, true)
+      |> Map.put(:file_regular?, fn path ->
+        if path == "/tmp/test-symphony-consent" do
+          true
+        else
+          send(parent, {:file_checked, path})
+          Path.basename(path) == "WORKFLOW.md"
+        end
+      end)
+
+    assert :ok = CLI.evaluate(["on"], deps)
+    assert_received {:file_checked, path}
+    assert Path.basename(path) == "WORKFLOW.md"
+  end
+
+  # ── stub subcommands ──────────────────────────────────────────────────────
+
+  test "off subcommand returns :no_wait" do
+    assert {:ok, :no_wait} = CLI.evaluate(["off"], %{})
+  end
+
+  test "status subcommand returns :no_wait" do
+    assert {:ok, :no_wait} = CLI.evaluate(["status"], %{})
+  end
+
+  test "init subcommand returns :no_wait" do
+    assert {:ok, :no_wait} = CLI.evaluate(["init"], %{})
+  end
+
+  test "doctor subcommand returns :no_wait" do
+    assert {:ok, :no_wait} = CLI.evaluate(["doctor"], %{})
+  end
+
+  # ── backward-compat (legacy flag) ─────────────────────────────────────────
+
+  test "returns the guardrails acknowledgement banner when the flag is missing" do
+    parent = self()
+    deps = base_deps(parent)
 
     assert {:error, banner} = CLI.evaluate(["WORKFLOW.md"], deps)
     assert banner =~ "This Symphony implementation is a low key engineering preview."
