@@ -73,7 +73,13 @@ defmodule SymphonyElixir.CLI do
   def evaluate(["off" | _rest], _deps), do: {:ok, :no_wait}
   def evaluate(["status" | _rest], _deps), do: {:ok, :no_wait}
   def evaluate(["init" | _rest], _deps), do: {:ok, :no_wait}
-  def evaluate(["doctor" | _rest], _deps), do: {:ok, :no_wait}
+
+  def evaluate(["doctor" | _rest], _deps) do
+    case SymphonyElixir.Doctor.run() do
+      :ok -> {:ok, :no_wait}
+      {:error, msg} -> {:error, msg}
+    end
+  end
   def evaluate(["logs" | _rest], _deps) do
     IO.puts("symphony logs is handled by the bin/symphony shell wrapper, not the escript directly.")
     {:ok, :no_wait}
