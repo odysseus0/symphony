@@ -157,8 +157,12 @@ defmodule SymphonyElixir.CLITest do
     assert {:ok, :no_wait} = CLI.evaluate(["status"], %{})
   end
 
-  test "init subcommand returns :no_wait" do
-    assert {:ok, :no_wait} = CLI.evaluate(["init"], %{})
+  test "init --demo subcommand returns :no_wait" do
+    # --demo mode writes a WORKFLOW.md without requiring interactive IO
+    tmp = Path.join(System.tmp_dir!(), "cli-test-init-#{System.unique_integer()}.md")
+    assert {:ok, :no_wait} = CLI.evaluate(["init", "--demo", "--output", tmp])
+    assert File.exists?(tmp)
+    File.rm!(tmp)
   end
 
   test "doctor subcommand returns :no_wait" do

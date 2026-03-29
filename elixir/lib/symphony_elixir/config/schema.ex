@@ -56,6 +56,8 @@ defmodule SymphonyElixir.Config.Schema do
       # Plane-specific fields
       field(:workspace_slug, :string)
       field(:project_id, :string)
+      # Memory tracker: inline issue definitions (used in demo mode)
+      field(:memory_issues, {:array, :map}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -64,7 +66,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> cast(
         attrs,
         [:kind, :endpoint, :api_key, :team_key, :project_slug, :assignee, :active_states, :terminal_states,
-         :workspace_slug, :project_id],
+         :workspace_slug, :project_id, :memory_issues],
         empty_values: []
       )
     end

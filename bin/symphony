@@ -277,8 +277,25 @@ print('Directive queued for ' + ident + ': ' + directive)
 "
     ;;
 
+  init)
+    shift  # remove "init"
+    # Do NOT call setup_env here — it reads LINEAR_API_KEY from Keychain which
+    # would fail for new users running `symphony init` or `symphony init --demo`.
+    # The escript handles credentials interactively when needed.
+    export HOME="/Users/javis"
+    export MIX_HOME="/Users/javis/.local/share/mise/installs/elixir/1.19.5-otp-28/.mix"
+    export MIX_ARCHIVES="${MIX_HOME}/archives"
+    export PATH="/Users/javis/.local/share/mise/installs/erlang/28.4.1/bin:/Users/javis/.local/share/mise/installs/elixir/1.19.5-otp-28/bin:${MIX_HOME}/escripts:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+    exec "$SYMPHONY_BIN" "init" "$@"
+    ;;
+
+  doctor)
+    setup_env
+    exec "$SYMPHONY_BIN" "doctor"
+    ;;
+
   *)
-    echo "Usage: symphony [on|off|status|logs|intervene] [args]" >&2
+    echo "Usage: symphony [on|off|status|logs|intervene|init|doctor] [args]" >&2
     exit 1
     ;;
 esac
