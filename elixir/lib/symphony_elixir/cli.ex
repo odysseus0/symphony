@@ -74,6 +74,15 @@ defmodule SymphonyElixir.CLI do
   def evaluate(["status" | _rest], _deps), do: {:ok, :no_wait}
   def evaluate(["init" | _rest], _deps), do: {:ok, :no_wait}
   def evaluate(["doctor" | _rest], _deps), do: {:ok, :no_wait}
+  def evaluate(["logs" | _rest], _deps) do
+    IO.puts("symphony logs is handled by the bin/symphony shell wrapper, not the escript directly.")
+    {:ok, :no_wait}
+  end
+
+  def evaluate(["intervene" | _rest], _deps) do
+    IO.puts("symphony intervene is handled by the bin/symphony shell wrapper, not the escript directly.")
+    {:ok, :no_wait}
+  end
 
   # Backward-compatible: old-style invocation with guardrail flag (CI/scripts)
   def evaluate(args, deps) do
@@ -125,6 +134,8 @@ defmodule SymphonyElixir.CLI do
       symphony status
       symphony init
       symphony doctor
+      symphony logs [--issue <identifier>] [--full] [--port <port>]
+      symphony intervene <issue-identifier> <directive> [--port <port>]
       symphony dynamic-tools-mcp [--linear-api-key <token>] [--linear-endpoint <url>]
 
     Legacy (CI/scripts):

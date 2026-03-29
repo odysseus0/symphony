@@ -165,6 +165,22 @@ defmodule SymphonyElixir.CLITest do
     assert {:ok, :no_wait} = CLI.evaluate(["doctor"], %{})
   end
 
+  test "logs subcommand returns :no_wait with shell redirect message" do
+    assert {:ok, :no_wait} = CLI.evaluate(["logs"], %{})
+  end
+
+  test "logs subcommand with --issue flag returns :no_wait" do
+    assert {:ok, :no_wait} = CLI.evaluate(["logs", "--issue", "BUB-123"], %{})
+  end
+
+  test "logs subcommand with --full flag returns :no_wait" do
+    assert {:ok, :no_wait} = CLI.evaluate(["logs", "--issue", "BUB-123", "--full"], %{})
+  end
+
+  test "intervene subcommand returns :no_wait with shell redirect message" do
+    assert {:ok, :no_wait} = CLI.evaluate(["intervene", "BUB-123", "use middleware instead"], %{})
+  end
+
   # ── backward-compat (legacy flag) ─────────────────────────────────────────
 
   test "returns the guardrails acknowledgement banner when the flag is missing" do
