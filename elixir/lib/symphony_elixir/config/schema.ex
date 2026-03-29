@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
-  alias SymphonyElixir.PathSafety
+  alias SymphonyElixir.{Credentials, PathSafety}
 
   @primary_key false
 
@@ -328,8 +328,8 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
 
-  @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
-  def parse(config) when is_map(config) do
+  @spec parse(map(), keyword()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
+  def parse(config, opts \\ []) when is_map(config) do
     config
     |> normalize_keys()
     |> drop_nil_values()
@@ -337,7 +337,8 @@ defmodule SymphonyElixir.Config.Schema do
     |> apply_action(:validate)
     |> case do
       {:ok, settings} ->
-        {:ok, finalize_settings(settings)}
+        credentials_fn = Keyword.get(opts, :credentials_fn, &Credentials.resolve/1)
+        {:ok, finalize_settings(settings, credentials_fn)}
 
       {:error, changeset} ->
         {:error, {:invalid_workflow_config, format_errors(changeset)}}
@@ -469,17 +470,17 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 
-  defp finalize_settings(settings) do
+  defp finalize_settings(settings, credentials_fn) do
     api_key_fallback =
       case settings.tracker.kind do
-        "plane" -> System.get_env("PLANE_API_KEY")
-        _ -> System.get_env("LINEAR_API_KEY")
+        "plane" -> credentials_fn.("PLANE_API_KEY")
+        _ -> credentials_fn.("LINEAR_API_KEY")
       end
 
     endpoint =
       case settings.tracker.kind do
         "plane" ->
-          resolve_secret_setting(settings.tracker.endpoint, System.get_env("PLANE_BASE_URL")) ||
+          resolve_secret_setting(settings.tracker.endpoint, credentials_fn.("PLANE_BASE_URL")) ||
             "http://localhost"
 
         _ ->
@@ -489,7 +490,8 @@ defmodule SymphonyElixir.Config.Schema do
     tracker = %{
       settings.tracker
       | api_key: resolve_secret_setting(settings.tracker.api_key, api_key_fallback),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE")),
+        assignee:
+          resolve_secret_setting(settings.tracker.assignee, credentials_fn.("LINEAR_ASSIGNEE")),
         endpoint: endpoint
     }
 

@@ -38,11 +38,16 @@ defmodule SymphonyElixir.TestSupport do
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
 
+        # Restrict credential resolution to env vars only during tests; avoids
+        # Keychain / credentials.json lookups interfering with test assertions.
+        Application.put_env(:symphony_elixir, :credentials_fn, &System.get_env/1)
+
         on_exit(fn ->
           Application.delete_env(:symphony_elixir, :workflow_file_path)
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:symphony_elixir, :credentials_fn)
           File.rm_rf(workflow_root)
         end)
 

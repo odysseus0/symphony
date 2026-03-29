@@ -299,7 +299,7 @@ defmodule SymphonyElixir.DynamicTools.MCPServer do
 
       _ ->
         linear_endpoint = Keyword.get(opts, :linear_endpoint, @default_linear_endpoint)
-        linear_api_key = Keyword.get(opts, :linear_api_key) || System.get_env("LINEAR_API_KEY")
+        linear_api_key = Keyword.get(opts, :linear_api_key) || SymphonyElixir.Credentials.resolve("LINEAR_API_KEY")
 
         fn query, variables, _client_opts ->
           post_linear_graphql(query, variables, linear_endpoint, linear_api_key)
