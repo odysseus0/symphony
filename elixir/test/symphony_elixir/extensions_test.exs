@@ -555,6 +555,92 @@ defmodule SymphonyElixir.ExtensionsTest do
              }
   end
 
+  test "phoenix observability api v2 endpoints: completed, activity, tokens, intervene" do
+    orchestrator_name = Module.concat(__MODULE__, :ApiV2Orchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{queued: false, coalesced: false, requested_at: DateTime.utc_now(), operations: []}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    # GET /api/v1/issues/completed — stub returns empty list
+    completed = json_response(get(build_conn(), "/api/v1/issues/completed"), 200)
+    assert completed["items"] == []
+    assert is_binary(completed["generated_at"])
+
+    # GET /api/v1/issues/:id/activity — stub returns empty activity
+    activity = json_response(get(build_conn(), "/api/v1/issues/MT-HTTP/activity"), 200)
+    assert activity["issue_identifier"] == "MT-HTTP"
+    assert activity["items"] == []
+    assert activity["has_more"] == false
+    assert is_nil(activity["since"])
+    assert is_binary(activity["generated_at"])
+
+    # GET /api/v1/issues/:id/activity?since=<ts> — since is echoed back
+    since_activity =
+      json_response(get(build_conn(), "/api/v1/issues/MT-HTTP/activity?since=2024-01-01T00:00:00Z"), 200)
+
+    assert since_activity["since"] == "2024-01-01T00:00:00Z"
+
+    # GET /api/v1/issues/:id/tokens — returns token data from snapshot
+    tokens = json_response(get(build_conn(), "/api/v1/issues/MT-HTTP/tokens"), 200)
+    assert tokens["issue_identifier"] == "MT-HTTP"
+    assert tokens["issue_id"] == "issue-http"
+    assert tokens["session_id"] == "thread-http"
+    assert tokens["turn_count"] == 7
+    assert tokens["total"] == %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+    assert length(tokens["turns"]) == 1
+    [turn] = tokens["turns"]
+    assert turn["session_id"] == "thread-http"
+    assert turn["turn_count"] == 7
+    assert turn["input_tokens"] == 2
+    assert turn["output_tokens"] == 3
+    assert turn["total_tokens"] == 5
+    assert is_binary(turn["recorded_at"])
+
+    # GET /api/v1/issues/:id/tokens — unknown issue returns 404
+    assert json_response(get(build_conn(), "/api/v1/issues/MT-MISSING/tokens"), 404) ==
+             %{"error" => %{"code" => "issue_not_found", "message" => "Issue not found"}}
+
+    # POST /api/v1/issues/:id/intervene — with directive returns 202
+    intervene =
+      json_response(
+        post(build_conn(), "/api/v1/issues/MT-HTTP/intervene", %{"directive" => "please stop"}),
+        202
+      )
+
+    assert intervene["issue_identifier"] == "MT-HTTP"
+    assert intervene["status"] == "queued"
+    assert intervene["directive"] == "please stop"
+
+    # POST /api/v1/issues/:id/intervene — missing directive returns 422
+    assert json_response(post(build_conn(), "/api/v1/issues/MT-HTTP/intervene", %{}), 422) ==
+             %{"error" => %{"code" => "directive_required", "message" => "directive must be a non-empty string"}}
+
+    # POST /api/v1/issues/:id/intervene — empty directive returns 422
+    assert json_response(
+             post(build_conn(), "/api/v1/issues/MT-HTTP/intervene", %{"directive" => "  "}),
+             422
+           ) == %{"error" => %{"code" => "directive_required", "message" => "directive must be a non-empty string"}}
+
+    # Method not allowed for new routes
+    assert json_response(post(build_conn(), "/api/v1/issues/completed", %{}), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
+
+    assert json_response(post(build_conn(), "/api/v1/issues/MT-HTTP/activity", %{}), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
+
+    assert json_response(post(build_conn(), "/api/v1/issues/MT-HTTP/tokens", %{}), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
+
+    assert json_response(get(build_conn(), "/api/v1/issues/MT-HTTP/intervene"), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
+  end
+
   test "dashboard bootstraps liveview from embedded static assets" do
     orchestrator_name = Module.concat(__MODULE__, :AssetOrchestrator)
 
