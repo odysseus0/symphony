@@ -116,22 +116,19 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     file_path = Map.get(args, "file_path") || Map.get(args, :file_path)
     comment_id = Map.get(args, "comment_id") || Map.get(args, :comment_id)
 
-    cond do
-      not is_binary(issue_id) or issue_id == "" ->
-        {:error, {:sync_workpad, "`issue_id` is required"}}
-
-      not is_binary(file_path) or file_path == "" ->
-        {:error, {:sync_workpad, "`file_path` is required"}}
-
-      true ->
-        comment_id = if is_binary(comment_id) and comment_id != "", do: comment_id
-        {:ok, issue_id, file_path, comment_id}
+    with :ok <- require_sync_workpad_arg(issue_id, "issue_id"),
+         :ok <- require_sync_workpad_arg(file_path, "file_path") do
+      comment_id = if is_binary(comment_id) and comment_id != "", do: comment_id
+      {:ok, issue_id, file_path, comment_id}
     end
   end
 
   defp normalize_sync_workpad_args(_args) do
     {:error, {:sync_workpad, "`issue_id` and `file_path` are required"}}
   end
+
+  defp require_sync_workpad_arg(value, _name) when is_binary(value) and value != "", do: :ok
+  defp require_sync_workpad_arg(_value, name), do: {:error, {:sync_workpad, "`#{name}` is required"}}
 
   defp read_workpad_file(path) do
     case File.read(path) do

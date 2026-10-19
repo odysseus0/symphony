@@ -108,7 +108,11 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    before_remove = Map.get(hooks, "before_remove")
+    assert before_remove =~ "git branch --show-current"
+    assert before_remove =~ "gh pr list --head"
+    assert before_remove =~ "gh pr close"
+    assert before_remove =~ "terminal state without merge"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -543,15 +547,16 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    before_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
     state = :sys.get_state(pid)
+    after_ms = System.monotonic_time(:millisecond)
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
-    assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert due_at_ms >= before_ms + 1_000
+    assert due_at_ms <= after_ms + 1_000
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
