@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""
+symphony-linear-cli — CLI wrapper for Linear GraphQL API.
+
+Allows agents to interact with Linear via shell commands when the
+linear_graphql dynamic tool is not available (e.g. in Cursor ACP sessions).
+
+Usage:
+    symphony-linear-cli query '{ viewer { id name } }'
+    symphony-linear-cli query 'mutation($id:String!,$state:String!){ issueUpdate(id:$id,input:{stateId:$state}){ success } }' --vars '{"id":"...","state":"..."}'
+    symphony-linear-cli update-issue <issue-id> --state "In Progress"
+    symphony-linear-cli comment <issue-id> "Comment body here"
+    symphony-linear-cli comment <issue-id> --file workpad.md
+    symphony-linear-cli update-comment <comment-id> "Updated body"
+    symphony-linear-cli update-comment <comment-id> --file workpad.md
+
+Expects LINEAR_API_KEY in the environment.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.request
+
+LINEAR_API_URL = "https://api.linear.app/graphql"
+
+
+def linear_graphql(query: str, variables: dict | None = None) -> dict:
+    api_key = os.environ.get("LINEAR_API_KEY", "")
+    if not api_key:
+        print("Error: LINEAR_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
+
+    payload = {"query": query}
+    if variables:
+        payload["variables"] = variables
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        LINEAR_API_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": api_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}: {e.read().decode()[:500]}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def cmd_query(args):
+    variables = json.loads(args.vars) if args.vars else None
+    result = linear_graphql(args.query, variables)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def cmd_update_issue(args):
+    input_fields = {}
+    if args.state:
+        states = linear_graphql(
+            'query($id: String!) { issue(id: $id) { team { states { nodes { id name } } } } }',
+            {"id": args.issue_id},
+        )
+        try:
+            state_nodes = states["data"]["issue"]["team"]["states"]["nodes"]
+            target = next((s for s in state_nodes if s["name"].lower() == args.state.lower()), None)
+            if target:
+                input_fields["stateId"] = target["id"]
+            else:
+                available = ", ".join(s["name"] for s in state_nodes)
+                print(f"Error: state '{args.state}' not found. Available: {available}", file=sys.stderr)
+                sys.exit(1)
+        except (KeyError, TypeError) as e:
+            print(f"Error resolving state: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    if not input_fields:
+        print("No fields to update", file=sys.stderr)
+        sys.exit(1)
+
+    result = linear_graphql(
+        'mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { id identifier state { name } } } }',
+        {"id": args.issue_id, "input": input_fields},
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def cmd_comment(args):
+    body = args.body
+    if args.file:
+        with open(args.file) as f:
+            body = f.read()
+
+    if not body:
+        print("Error: comment body required (--file or positional arg)", file=sys.stderr)
+        sys.exit(1)
+
+    result = linear_graphql(
+        'mutation($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success comment { id url } } }',
+        {"issueId": args.issue_id, "body": body},
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def cmd_update_comment(args):
+    body = args.body
+    if args.file:
+        with open(args.file) as f:
+            body = f.read()
+
+    if not body:
+        print("Error: comment body required (--file or positional arg)", file=sys.stderr)
+        sys.exit(1)
+
+    result = linear_graphql(
+        'mutation($id: String!, $body: String!) { commentUpdate(id: $id, input: { body: $body }) { success comment { id url } } }',
+        {"id": args.comment_id, "body": body},
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Linear GraphQL CLI for Symphony agents")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_query = sub.add_parser("query", help="Execute raw GraphQL")
+    p_query.add_argument("query", help="GraphQL query/mutation string")
+    p_query.add_argument("--vars", help="JSON variables object")
+    p_query.set_defaults(func=cmd_query)
+
+    p_update = sub.add_parser("update-issue", help="Update a Linear issue")
+    p_update.add_argument("issue_id", help="Linear issue UUID or identifier")
+    p_update.add_argument("--state", help="Target state name (e.g. 'In Progress')")
+    p_update.set_defaults(func=cmd_update_issue)
+
+    p_comment = sub.add_parser("comment", help="Create a comment on an issue")
+    p_comment.add_argument("issue_id", help="Linear issue UUID or identifier")
+    p_comment.add_argument("body", nargs="?", default="", help="Comment body text")
+    p_comment.add_argument("--file", help="Read body from file instead")
+    p_comment.set_defaults(func=cmd_comment)
+
+    p_ucomment = sub.add_parser("update-comment", help="Update an existing comment")
+    p_ucomment.add_argument("comment_id", help="Comment UUID")
+    p_ucomment.add_argument("body", nargs="?", default="", help="New comment body")
+    p_ucomment.add_argument("--file", help="Read body from file instead")
+    p_ucomment.set_defaults(func=cmd_update_comment)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

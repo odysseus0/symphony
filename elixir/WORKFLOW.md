@@ -33,12 +33,21 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
-codex:
-  command: codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh --model gpt-5.3-codex app-server
-  approval_policy: never
-  thread_sandbox: danger-full-access
-  turn_sandbox_policy:
-    type: dangerFullAccess
+agents:
+  codex:
+    command: codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh --model gpt-5.3-codex app-server
+    approval_policy: never
+    thread_sandbox: danger-full-access
+    turn_sandbox_policy:
+      type: dangerFullAccess
+  cursor:
+    command: cursor-symphony-bridge --model gpt-5.4
+    approval_policy: never
+    thread_sandbox: danger-full-access
+routing:
+  default_agent: codex
+  by_label:
+    use-cursor: cursor
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
@@ -74,9 +83,19 @@ Instructions:
 
 Work only in the provided repository copy. Do not touch any other path.
 
-## Prerequisite: `linear_graphql` tool is available
+## Linear access
 
-The agent talks to Linear via the `linear_graphql` tool injected by Symphony's app-server. If it is not present, stop and ask the user to configure Linear. Do not use a Linear MCP server — it returns full JSON payloads that waste tokens. Use `linear_graphql` with narrowly scoped queries instead.
+The agent talks to Linear via one of two mechanisms (check which is available):
+
+1. **`linear_graphql` tool** (preferred) — if a built-in tool named `linear_graphql` is available, use it directly with narrowly scoped GraphQL queries.
+2. **`symphony-linear-cli` shell command** — if the tool is not available, use the CLI via terminal:
+   - Raw query: `symphony-linear-cli query '{ viewer { id name } }'`
+   - With variables: `symphony-linear-cli query '<mutation>' --vars '{"id":"...","state":"..."}'`
+   - Update issue state: `symphony-linear-cli update-issue <issue-uuid> --state "In Progress"`
+   - Create comment: `symphony-linear-cli comment <issue-uuid> "body text"` or `symphony-linear-cli comment <issue-uuid> --file workpad.md`
+   - Update comment: `symphony-linear-cli update-comment <comment-uuid> --file workpad.md`
+
+Do not stop or report blocked if `linear_graphql` tool is missing — use `symphony-linear-cli` instead. Do not use a Linear MCP server — it returns full JSON payloads that waste tokens.
 
 ## Default posture
 
